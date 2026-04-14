@@ -1,0 +1,17 @@
+# Keep the build context small and avoid copying junk into the image.
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+scripts/        # not needed at runtime (only to rebuild parquets)
+README.md
+Dockerfile
+.dockerignore

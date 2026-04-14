@@ -35,6 +35,21 @@ python -m streamlit run app/app.py
 
 A browser tab opens at `http://localhost:8501`.
 
+## Run anywhere with Docker
+
+Portability insurance: the whole app (code + precomputed parquets) fits in
+a self-contained image that runs identically on any host. Useful if
+Streamlit Community Cloud ever becomes unavailable or paid — you can
+redeploy to any Docker-capable service (Hugging Face Spaces, Render,
+Fly.io, a university VM, AWS/GCP/Azure) without code changes.
+
+```bash
+docker build -t global-ineq-projections .
+docker run --rm -p 8501:8501 global-ineq-projections
+```
+
+Then visit `http://localhost:8501`.
+
 ## Project layout
 
 ```
