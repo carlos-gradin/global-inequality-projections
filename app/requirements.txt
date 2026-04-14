@@ -1,0 +1,11 @@
+# Python 3.11+ recommended.
+# Install with:  python -m pip install -r app/requirements.txt
+streamlit>=1.50
+pandas>=2.2
+numpy>=2.0
+plotly>=5.24
+pyarrow>=17.0
+# Only needed to rebuild the baseline parquet from the raw .dta.
+# Remove from deployment requirements if you host just the parquets.
+pyreadstat>=1.2
+requests>=2.32

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Raw source data — too large for GitHub and regenerable via scripts/
+*.dta
+*.csv.gz
+
+# Local launcher bats (per-machine paths)
+run_app*.bat
