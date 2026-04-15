@@ -77,6 +77,17 @@ def load_history_country_indices() -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+@st.cache_data(show_spinner=False)
+def load_imf_benchmark() -> pd.DataFrame:
+    """IMF WEO April 2026 per-country annual real-GDP growth rates for
+    years 2027..2031 (precomputed by scripts/build_imf_benchmark.py).
+    Returns an empty DataFrame if the file is not yet built."""
+    path = DATA_DIR / "imf_benchmark_2027_2031.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
 # ----------------------------------------------------------------------
 # Cached projection helpers for the "Compare scenarios" tab.
 #
@@ -123,6 +134,25 @@ def run_indices_benchmark(n_years: int, target_year: int) -> pd.DataFrame:
                        uniform_rate=0.0)
     panel = project(baseline, regions, wpp, dummy, backfill,
                     post2026_rate=bench)
+    return indices(panel)
+
+
+@st.cache_data(show_spinner="Projecting IMF benchmark…")
+def run_indices_imf_benchmark(target_year: int) -> pd.DataFrame:
+    """Project using the IMF WEO benchmark: per-country scalar growth
+    rates for 2027..2031 (held constant afterwards), broadcast across
+    all 100 percentiles (no change in within-country inequality).
+    Returns the per-year inequality indices."""
+    baseline, regions, wpp, backfill = load_data()
+    imf = load_imf_benchmark()
+    if imf.empty:
+        return pd.DataFrame()
+    # Pivot long → wide: rows = c3, cols = year, values = growth_rate.
+    sy_wide = imf.pivot(index="c3", columns="year", values="growth_rate")
+    dummy = GrowthSpec(mode="uniform", target_year=int(target_year),
+                       uniform_rate=0.0)
+    panel = project(baseline, regions, wpp, dummy, backfill,
+                    post2026_scalar_by_year=sy_wide)
     return indices(panel)
 
 
@@ -918,7 +948,7 @@ with tab6:
         if scen_key not in st.session_state:
             st.session_state[scen_key] = []   # list of (name, spec_dict)
 
-        col_top1, col_top2, col_top3 = st.columns([2, 1, 1])
+        col_top1, col_top2, col_top3, col_top4 = st.columns([2, 1, 1, 1])
         with col_top1:
             measure_label = st.selectbox(
                 "Indicator",
@@ -940,6 +970,15 @@ with tab6:
                 "Benchmark window (years)", 5, 20, 10, step=1,
                 help="Length of the WIID window used to estimate the "
                      "per-(country, percentile) CAGR for the benchmark.",
+            )
+        with col_top4:
+            include_imf = st.checkbox(
+                "Include IMF benchmark",
+                value=False,
+                help="IMF WEO April 2026 per-country growth rates for "
+                     "2027..2031 (held constant afterwards), applied "
+                     "uniformly across all percentiles (no change in "
+                     "within-country inequality).",
             )
 
         # ---- Save / clear controls ---------------------------------------
@@ -1034,6 +1073,22 @@ with tab6:
                 name=f"Benchmark (hist. continuation, N={bench_n_years})",
                 line=dict(color="#7f7f7f", width=2, dash="dash"),
             ))
+
+        # (b') IMF WEO benchmark.
+        if include_imf:
+            imf_idx = run_indices_imf_benchmark(int(target_year))
+            if not imf_idx.empty:
+                fig.add_trace(go.Scatter(
+                    x=imf_idx["year"], y=_yvals(imf_idx, measure),
+                    mode="lines",
+                    name="IMF benchmark (WEO 2027–2031, then held)",
+                    line=dict(color="#8c564b", width=2, dash="dot"),
+                ))
+            else:
+                st.warning(
+                    "IMF benchmark parquet not found. Run "
+                    "`python scripts/build_imf_benchmark.py` to build it."
+                )
 
         # (c) Saved scenarios the user picked.
         palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",

@@ -276,6 +276,7 @@ def project(
     backfill: pd.DataFrame,
     *,
     post2026_rate: Optional[pd.DataFrame] = None,
+    post2026_scalar_by_year: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Produce a long panel with one row per (c3, year, percentile) covering
@@ -300,11 +301,25 @@ def project(
     (see `benchmark_growth`).  The backfill phase (2023..2026) is never
     overridden; only the user-driven phase is.
 
+    `post2026_scalar_by_year` (optional): if given, a DataFrame indexed by
+    c3 with columns = integer years and values = annualised growth rate
+    (decimal).  Unlike `post2026_rate`, this table varies year-by-year
+    but is applied uniformly across the 100 percentiles of each country
+    (no within-country shape change).  For any projection year t ≥ 2027
+    beyond the last year in the table, the rate of that last year is held
+    constant ("flat extrapolation").  Used to implement the IMF WEO
+    benchmark (scripts/build_imf_benchmark.py).  Mutually exclusive with
+    `post2026_rate`.
+
     `weight` is the population of the percentile in that year (people),
     i.e. country_population * 0.01 .
     """
     if spec.target_year <= BASE_YEAR:
         raise ValueError(f"target_year must be > {BASE_YEAR}")
+    if post2026_rate is not None and post2026_scalar_by_year is not None:
+        raise ValueError(
+            "post2026_rate and post2026_scalar_by_year are mutually exclusive"
+        )
 
     # Reshape baseline to wide: rows = c3, cols = percentile 1..100.
     base_wide = (
@@ -323,6 +338,21 @@ def project(
     common    = base_wide.index.intersection(post_rate.index)
     base_wide = base_wide.loc[common]
     post_rate = post_rate.loc[common, base_wide.columns]
+
+    # Align the IMF-style scalar table if provided.
+    if post2026_scalar_by_year is not None:
+        sy_wide = (
+            post2026_scalar_by_year
+            .reindex(base_wide.index)
+            .fillna(0.0)
+        )
+        # Ensure columns are ints and sorted.
+        sy_wide.columns = [int(c) for c in sy_wide.columns]
+        sy_wide = sy_wide.reindex(sorted(sy_wide.columns), axis=1)
+        sy_last_year = int(max(sy_wide.columns))
+    else:
+        sy_wide = None
+        sy_last_year = None
 
     # Backfill lookup: c3 × year matrix of per-country scalar rates.
     # Any country missing from backfill will get 0% growth for those years
@@ -359,8 +389,14 @@ def project(
             country_rate = (bf_wide[t].to_numpy() if t in bf_wide.columns
                             else np.zeros(n))
             rate_arr = np.broadcast_to(country_rate[:, None], (n, 100))
+        elif sy_wide is not None:
+            # IMF-style per-(country, year) scalar; hold the last year's
+            # rate constant for any year beyond the table's horizon.
+            lookup_year = min(t, sy_last_year)
+            country_rate = sy_wide[lookup_year].to_numpy()
+            rate_arr = np.broadcast_to(country_rate[:, None], (n, 100))
         else:
-            # Post-2026: user-driven spec OR benchmark override.
+            # Post-2026: user-driven spec OR per-percentile benchmark override.
             rate_arr = post_arr
         inc_curr = inc_curr * (1.0 + rate_arr)
         frames.append(_frame(inc_curr, t))
