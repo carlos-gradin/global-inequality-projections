@@ -804,9 +804,22 @@ with tab4:
                "#ff7f0e", "#17becf", "#e377c2", "#bcbd22"]
     if within_agg == "region_wb":
         group_order = REGIONS
+        group_kind  = "regions"
     else:
         group_order = INCOMEGROUPS
+        group_kind  = "income groups"
+
+    # Let the user add / remove groups on the chart (default: all).
+    selected_groups = st.multiselect(
+        f"Show {group_kind} on chart",
+        options=group_order,
+        default=group_order,
+        key=f"within_groups_{within_agg}",
+        help="World line is always shown. Add or remove groups here.",
+    )
     for i, g in enumerate(group_order):
+        if g not in selected_groups:
+            continue
         sub = plot_df[plot_df["group"] == g].sort_values("year")
         if not len(sub):
             continue
@@ -850,6 +863,72 @@ with tab4:
             "`python scripts/build_history_within_country.py` from the "
             "project root to precompute 1950–2021."
         )
+
+    # ------------------------------------------------------------------
+    # Second chart: per-country evolution of the same indicator.
+    # ------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Evolution by country")
+    st.caption(
+        "Same indicator, but shown for individual countries instead of "
+        "regional / income-group averages. Defaults to India, China, "
+        "Brazil, and the United States; add or remove any country below."
+    )
+
+    # Country-picker options: sorted by country name, ISO3 shown in label.
+    c3_to_name = regions.set_index("c3")["country"].to_dict()
+    country_options = sorted(
+        [c for c in c_all["c3"].unique() if c in c3_to_name],
+        key=lambda c: c3_to_name[c],
+    )
+    country_labels = {c: f"{c3_to_name[c]} ({c})" for c in country_options}
+
+    DEFAULT_COUNTRIES = [c for c in ["IND", "CHN", "BRA", "USA"]
+                         if c in country_options]
+    selected_c3 = st.multiselect(
+        "Countries",
+        options=country_options,
+        default=DEFAULT_COUNTRIES,
+        format_func=lambda c: country_labels[c],
+        key="within_countries",
+    )
+
+    if selected_c3:
+        fig_c = go.Figure()
+        palette_c = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
+                     "#17becf", "#e377c2", "#bcbd22", "#8c564b", "#7f7f7f"]
+        for i, c3 in enumerate(selected_c3):
+            sub = (c_all[c_all["c3"] == c3]
+                   .sort_values("year")[["year", within_measure]])
+            if not len(sub):
+                continue
+            fig_c.add_trace(go.Scatter(
+                x=sub["year"], y=_scale(sub[within_measure]),
+                mode="lines", name=country_labels[c3],
+                line=dict(color=palette_c[i % len(palette_c)], width=2),
+            ))
+
+        fig_c.add_vrect(
+            x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+            fillcolor="lightgrey", opacity=0.25, line_width=0,
+            annotation_text="Backfill (WDI/WEO)",
+            annotation_position="top left",
+        )
+        fig_c.add_vline(
+            x=PROJECTION_START, line_dash="dash", line_color="grey",
+            annotation_text="User projection →", annotation_position="top",
+        )
+        fig_c.update_layout(
+            title=f"Within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
+                  f"by country, {history_from_year} → {target_year}",
+            xaxis=dict(title="Year", dtick=5),
+            yaxis=dict(title=y_title, rangemode="tozero"),
+            legend=dict(orientation="h", y=-0.2),
+            height=520,
+        )
+        st.plotly_chart(fig_c, use_container_width=True)
+    else:
+        st.caption("Pick at least one country to show the chart.")
 
 # ---- Tab 5: summary table (2022 → target year) ----
 with tab5:
