@@ -33,11 +33,12 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
 @st.cache_data(show_spinner=False)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     baseline = pd.read_parquet(DATA_DIR / "baseline_2022.parquet")
     regions  = pd.read_parquet(DATA_DIR / "regions.parquet")
     wpp      = pd.read_parquet(DATA_DIR / "wpp_population.parquet")
-    return baseline, regions, wpp
+    backfill = pd.read_parquet(DATA_DIR / "backfill_2023_2026.parquet")
+    return baseline, regions, wpp, backfill
 
 
 @st.cache_data(show_spinner=False)
@@ -59,10 +60,10 @@ def load_history_bw() -> pd.DataFrame:
 def run_pipeline(spec_dict: dict) -> dict:
     """Run project + indices + decomposition + by-group summary.
     We pass a plain dict so Streamlit's cache can hash the inputs."""
-    baseline, regions, wpp = load_data()
+    baseline, regions, wpp, backfill = load_data()
     spec = GrowthSpec(**spec_dict)
 
-    panel = project(baseline, regions, wpp, spec)
+    panel = project(baseline, regions, wpp, spec, backfill)
     idx   = indices(panel)
     # Country-level between/within decomposition (naive + Shapley) per
     # year.  Used by Tab 3.
@@ -93,7 +94,7 @@ st.caption(
     "chosen growth pattern, using UN WPP 2024 population projections."
 )
 
-baseline, regions, wpp = load_data()
+baseline, regions, wpp, backfill = load_data()
 REGIONS      = sorted(regions["region_wb"].dropna().unique())
 INCOMEGROUPS = ["Low income", "Lower middle income",
                 "Upper middle income", "High income"]   # fixed order
@@ -112,7 +113,11 @@ with st.sidebar:
 
     st.header("Growth pattern")
 
-    target_year = st.slider("Target year", 2023, 2100, 2050, step=1)
+    # User-chosen growth pattern applies from 2027 onwards.
+    # 2023–2026 is backfilled with realised data (WB WDI) and short-term
+    # forecasts (IMF WEO April 2026) — documented in the footer caption
+    # at the bottom of the main page and in build_backfill.py.
+    target_year = st.slider("Target year", 2027, 2100, 2050, step=1)
 
     mode_label = st.radio(
         "Mode",
@@ -358,7 +363,8 @@ bw_plot = pd.concat(
 ).sort_values("year").reset_index(drop=True)
 
 # Constant reused by the charts — marks where the projection begins.
-PROJECTION_START = 2022
+PROJECTION_START = 2027   # first year of user-driven growth
+BACKFILL_START   = 2023   # first year of WDI/WEO backfill
 
 
 # ======================================================================
@@ -386,9 +392,16 @@ with tab1:
                              mode="lines", name="GE(2) (right axis)",
                              yaxis="y2", line=dict(dash="dot")))
     # Vertical line marking where the projection starts.
+    # Backfill band (2023–2026): WDI+WEO fill, not user-driven.
+    fig.add_vrect(
+        x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+        fillcolor="lightgrey", opacity=0.25, line_width=0,
+        annotation_text="Backfill (WDI/WEO)", annotation_position="top left",
+    )
+    # Vertical line where the USER-chosen growth pattern begins.
     fig.add_vline(
         x=PROJECTION_START, line_dash="dash", line_color="grey",
-        annotation_text="Projection →", annotation_position="top",
+        annotation_text="User projection →", annotation_position="top",
     )
     fig.update_layout(
         title=f"Global inequality, {history_from_year} → {target_year}",
@@ -414,9 +427,16 @@ with tab2:
     fig.add_trace(go.Scatter(x=idx_plot["year"], y=idx_plot["palma"],
                              mode="lines", name="Palma (right axis)",
                              yaxis="y2", line=dict(dash="dot")))
+    # Backfill band (2023–2026): WDI+WEO fill, not user-driven.
+    fig.add_vrect(
+        x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+        fillcolor="lightgrey", opacity=0.25, line_width=0,
+        annotation_text="Backfill (WDI/WEO)", annotation_position="top left",
+    )
+    # Vertical line where the USER-chosen growth pattern begins.
     fig.add_vline(
         x=PROJECTION_START, line_dash="dash", line_color="grey",
-        annotation_text="Projection →", annotation_position="top",
+        annotation_text="User projection →", annotation_position="top",
     )
     fig.update_layout(
         title="Population-group income shares and Palma ratio",
@@ -478,9 +498,11 @@ with tab3:
                                mode="lines",
                                name="I(y^w) — standardized (within)",
                                line=dict(color="#d62728")))
+        f.add_vrect(x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+                    fillcolor="lightgrey", opacity=0.25, line_width=0)
         f.add_vline(x=PROJECTION_START, line_dash="dash",
                     line_color="grey",
-                    annotation_text="Projection →",
+                    annotation_text="User projection →",
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: naive between/within",
@@ -510,9 +532,11 @@ with tab3:
         f.add_trace(go.Scatter(x=df["year"], y=df[m],
                                mode="lines", name="I(y) — total",
                                line=dict(color="black", width=2, dash="dot")))
+        f.add_vrect(x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+                    fillcolor="lightgrey", opacity=0.25, line_width=0)
         f.add_vline(x=PROJECTION_START, line_dash="dash",
                     line_color="grey",
-                    annotation_text="Projection →",
+                    annotation_text="User projection →",
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: Shapley between/within (sums to total)",
@@ -598,6 +622,13 @@ with c2:
 st.caption(
     "Baseline: WIID (wiidglobal_long.dta), 2022 cross-section, 211 "
     "countries × 100 percentiles. "
+    "Backfill 2023–2026: WB WDI realised growth (2023–2024) + IMF WEO "
+    "April 2026 estimates/forecasts (2025–2026), applied uniformly "
+    "across each country's percentiles (within-country shape held "
+    "constant). The 22 countries with neither WDI nor WEO coverage in "
+    "at least one year (small territories plus CUB, PRK, XKX, PSE, "
+    "AFG, LBN, LKA, SYR) are imputed with the population-weighted "
+    "mean growth of their World Bank region. "
     "Population projections: UN WPP 2024, Medium variant. "
     "Inequality computed on pooled country-percentile cells weighted "
     "by population. In Modes A and B within-country shape is invariant; "
