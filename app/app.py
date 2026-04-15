@@ -172,6 +172,11 @@ with st.sidebar:
     # --- Mode C ---
     elif mode_label.startswith("C."):
         st.subheader("Rates by population group (%)")
+        st.caption(
+            "Rates apply to each block **within every country** "
+            "(e.g. the bottom 40 % of each country, not the bottom 40 % "
+            "of the world pooled)."
+        )
         block_rates["b40"] = st.number_input(
             "Bottom 40 %",  value=base_rate_pct, step=0.1,
             min_value=-5.0, max_value=15.0, key="c_b40") / 100.0
@@ -250,6 +255,17 @@ if mode_label.startswith("D."):
     groups_D = REGIONS if aggregate == "region_wb" else INCOMEGROUPS
     with st.expander("Growth rates by group × population block (%)",
                      expanded=True):
+        # Clarify what the rates actually apply to.  A rate of e.g. 3% in
+        # "SSA × Bottom 40" grows the bottom 40 % WITHIN EACH SSA country,
+        # not the bottom 40 % of the regionally-pooled SSA distribution.
+        st.info(
+            "**How these rates are applied.** The rate you type in a "
+            "(group × block) cell is applied to that population block "
+            "**within each country of the group**, not to the regionally-"
+            "pooled distribution. For example, 3 % in *SSA × Bottom 40* "
+            "means the bottom 40 % of each SSA country (Nigeria, Kenya, …) "
+            "grows at 3 % — not the poorest 40 % of SSA as a whole."
+        )
         default_table = pd.DataFrame(
             {"b40": base_rate_pct, "m50": base_rate_pct, "t10": base_rate_pct},
             index=pd.Index(groups_D, name="group"),
