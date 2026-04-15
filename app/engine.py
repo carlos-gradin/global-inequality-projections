@@ -199,12 +199,83 @@ BACKFILL_END_YEAR     = 2026      # last year covered by WDI / WEO backfill
 PROJECTION_START_YEAR = 2027      # first year of USER-driven growth
 
 
+# ======================================================================
+# Benchmark ("historical continuation") growth
+# ======================================================================
+
+def benchmark_growth(historical: pd.DataFrame,
+                     n_years: int = 10,
+                     base_year: int = BASE_YEAR) -> pd.DataFrame:
+    """
+    Compute a per-(country, percentile) compound annual growth rate from
+    the last `n_years` of the WIID historical panel.
+
+    For each (c3, percentile) pair the rate is
+
+        CAGR = (income[base_year] / income[base_year - n_years]) ** (1/n_years) - 1
+
+    The WIID Companion panel is balanced (survey-year gaps interpolated
+    and post-last-survey years extrapolated upstream), so no fallback is
+    needed — every cell has a value.  If income at either endpoint is
+    non-positive the CAGR is set to 0.0 (degenerate case, shouldn't occur
+    with the current dataset).
+
+    Parameters
+    ----------
+    historical : DataFrame with columns c3, year, percentile, income_level
+                 (as produced by scripts/build_historical.py).
+    n_years    : Window length, in years (e.g. 10 = CAGR over 2012..2022
+                 when base_year=2022).
+    base_year  : End of the window (default 2022 = WIID latest).
+
+    Returns
+    -------
+    DataFrame indexed by c3 with 100 columns (percentile 1..100) giving
+    the annualised real growth rate (decimal, e.g. 0.025 for 2.5%).
+    Suitable for passing as `post2026_rate` to `project()`.
+    """
+    if n_years < 1:
+        raise ValueError("n_years must be >= 1")
+    t0 = base_year - n_years
+    t1 = base_year
+
+    df = historical[historical["year"].isin([t0, t1])].copy()
+    # Pivot to (c3, percentile) x year.
+    wide = df.pivot_table(index=["c3", "percentile"],
+                          columns="year",
+                          values="income_level")
+    if t0 not in wide.columns or t1 not in wide.columns:
+        raise ValueError(
+            f"historical panel lacks data for year {t0} or {t1}; "
+            f"available years: {sorted(wide.columns.tolist())}"
+        )
+
+    y0 = wide[t0].to_numpy()
+    y1 = wide[t1].to_numpy()
+    # Safe CAGR: where either endpoint is <= 0, set to 0.
+    good = (y0 > 0) & (y1 > 0)
+    rate = np.zeros_like(y0, dtype=float)
+    rate[good] = (y1[good] / y0[good]) ** (1.0 / n_years) - 1.0
+
+    out = pd.DataFrame({"growth_rate": rate}, index=wide.index)
+    out = out.reset_index().pivot(index="c3",
+                                  columns="percentile",
+                                  values="growth_rate")
+    # Ensure columns are exactly 1..100 in order.
+    out = out.reindex(columns=range(1, 101))
+    out.index.name = "c3"
+    out.columns.name = "percentile"
+    return out
+
+
 def project(
     baseline: pd.DataFrame,
     regions:  pd.DataFrame,
     wpp:      pd.DataFrame,
     spec:     GrowthSpec,
     backfill: pd.DataFrame,
+    *,
+    post2026_rate: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Produce a long panel with one row per (c3, year, percentile) covering
@@ -220,8 +291,14 @@ def project(
                     distribution shape is held constant during backfill
                     years (consistent with Gradín 2024 and Kanbur,
                     Ortiz-Juarez & Sumner 2024).
-        2027..target "projection": user-chosen growth pattern from `spec`,
-                     identical to the original behaviour.
+        2027..target "projection": user-chosen growth pattern from `spec`.
+
+    `post2026_rate` (optional): if given, a DataFrame indexed by c3 with
+    columns = percentile 1..100 and values = annualised growth rate
+    (decimal).  It overrides `spec` for years >= PROJECTION_START_YEAR
+    and is used to implement the historical-continuation benchmark
+    (see `benchmark_growth`).  The backfill phase (2023..2026) is never
+    overridden; only the user-driven phase is.
 
     `weight` is the population of the percentile in that year (people),
     i.e. country_population * 0.01 .
@@ -229,19 +306,23 @@ def project(
     if spec.target_year <= BASE_YEAR:
         raise ValueError(f"target_year must be > {BASE_YEAR}")
 
-    # User-driven annualised growth rate per (country, percentile).
-    # Used only from PROJECTION_START_YEAR onwards.
-    spec_rate = _percentile_growth_rates(regions, spec)             # c3 × 1..100
-
     # Reshape baseline to wide: rows = c3, cols = percentile 1..100.
     base_wide = (
         baseline.pivot(index="c3", columns="percentile", values="income_level")
         .sort_index()
     )
+
+    # Rate array used from PROJECTION_START_YEAR onwards.  Either
+    # user-driven (default) or the override passed in.
+    if post2026_rate is None:
+        post_rate = _percentile_growth_rates(regions, spec)         # c3 × 1..100
+    else:
+        post_rate = post2026_rate
+
     # Align everything on the same countries & percentile columns.
-    common    = base_wide.index.intersection(spec_rate.index)
+    common    = base_wide.index.intersection(post_rate.index)
     base_wide = base_wide.loc[common]
-    spec_rate = spec_rate.loc[common, base_wide.columns]
+    post_rate = post_rate.loc[common, base_wide.columns]
 
     # Backfill lookup: c3 × year matrix of per-country scalar rates.
     # Any country missing from backfill will get 0% growth for those years
@@ -255,7 +336,7 @@ def project(
     c3_idx     = base_wide.index
     perc_cols  = base_wide.columns
     n          = len(c3_idx)
-    spec_arr   = spec_rate.to_numpy()                               # n × 100
+    post_arr   = post_rate.to_numpy()                               # n × 100
 
     # --- iterative income-level build -------------------------------------
     # We loop year-by-year because growth rates now vary across years in
@@ -279,8 +360,8 @@ def project(
                             else np.zeros(n))
             rate_arr = np.broadcast_to(country_rate[:, None], (n, 100))
         else:
-            # User-driven: may vary by percentile within country.
-            rate_arr = spec_arr
+            # Post-2026: user-driven spec OR benchmark override.
+            rate_arr = post_arr
         inc_curr = inc_curr * (1.0 + rate_arr)
         frames.append(_frame(inc_curr, t))
 
@@ -423,6 +504,79 @@ def indices(panel: pd.DataFrame) -> pd.DataFrame:
             "atk_025", "atk_050", "atk_075", "atk_1", "atk_2",
             "bottom20", "bottom40", "middle50", "top10", "top20",
             "palma", "s80s20"]
+    return out[cols]
+
+
+# ----------------------------------------------------------------------
+# Per-country (within-country) inequality indices
+# ----------------------------------------------------------------------
+#
+# For one (country, year) the panel stores 100 rows, one per percentile,
+# each with equal implicit weight (one percentile = 1 % of country pop).
+# Inequality measures used here are scale-invariant in the weights, so
+# uniform weights give exactly the same number as the country population
+# weights — we use w = 1 for simplicity.
+#
+# The output row also records the country's total population in that year
+# (sum of the 100 percentile weights), so the app can later compute
+# population-weighted cross-country means.
+
+_COUNTRY_INDEX_COLS = [
+    "mean_income",
+    "gini", "ge_m1", "ge0", "ge1", "ge2",
+    "atk_050", "atk_1", "atk_2",
+    "bottom20", "bottom40", "middle50", "top10", "top20",
+    "palma", "s80s20",
+]
+
+
+def _country_year_unweighted(y: np.ndarray) -> dict:
+    """Inequality indices for one country-year, on 100 percentile values
+    with equal weights (weights cancel in every measure used here)."""
+    w = np.ones_like(y, dtype=float)
+    out = {
+        "mean_income": float(np.mean(y)),
+        "gini":   _weighted_gini(y, w),
+        "ge_m1":  _weighted_ge(y, w, -1.0),
+        "ge0":    _weighted_ge(y, w,  0.0),
+        "ge1":    _weighted_ge(y, w,  1.0),
+        "ge2":    _weighted_ge(y, w,  2.0),
+        "atk_050": _weighted_atkinson(y, w, 0.50),
+        "atk_1":   _weighted_atkinson(y, w, 1.00),
+        "atk_2":   _weighted_atkinson(y, w, 2.00),
+        "bottom20": _share_by_pop_quantile(y, w, 0.00, 0.20),
+        "bottom40": _share_by_pop_quantile(y, w, 0.00, 0.40),
+        "middle50": _share_by_pop_quantile(y, w, 0.40, 0.90),
+        "top10":    _share_by_pop_quantile(y, w, 0.90, 1.00),
+        "top20":    _share_by_pop_quantile(y, w, 0.80, 1.00),
+    }
+    out["palma"]  = (out["top10"]    / out["bottom40"]) if out["bottom40"] > 0 else np.nan
+    out["s80s20"] = (out["top20"]    / out["bottom20"]) if out["bottom20"] > 0 else np.nan
+    return out
+
+
+def country_indices(panel: pd.DataFrame) -> pd.DataFrame:
+    """Per-country-year inequality indices.  One row per (c3, year).
+
+    Input: a long panel with columns c3, year, percentile, income_level,
+    weight (weight = country_pop * 0.01 per percentile).
+
+    Returns columns: c3, year, population, and every measure listed in
+    `_COUNTRY_INDEX_COLS`.
+    """
+    # Sort once so the groupby loops are cheap and deterministic.
+    pn = panel.sort_values(["c3", "year", "percentile"])
+    rows = []
+    for (c, yr), df in pn.groupby(["c3", "year"], sort=False):
+        y = df["income_level"].to_numpy(dtype=float)
+        r = _country_year_unweighted(y)
+        r["c3"]         = c
+        r["year"]       = int(yr)
+        # Country total population = sum of percentile weights.
+        r["population"] = float(df["weight"].sum())
+        rows.append(r)
+    out = pd.DataFrame(rows)
+    cols = ["c3", "year", "population"] + _COUNTRY_INDEX_COLS
     return out[cols]
 
 

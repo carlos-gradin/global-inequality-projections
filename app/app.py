@@ -24,7 +24,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine import (GrowthSpec, project, indices, indices_by_group,
-                    between_within_country)
+                    between_within_country, benchmark_growth,
+                    country_indices)
 
 # ----------------------------------------------------------------------
 # Paths & data loading (cached — only re-reads on file change).
@@ -56,6 +57,75 @@ def load_history_bw() -> pd.DataFrame:
     return pd.read_parquet(DATA_DIR / "history_between_within.parquet")
 
 
+@st.cache_data(show_spinner=False)
+def load_historical_panel() -> pd.DataFrame:
+    """Historical WIID panel (c3, year, percentile, income_level) for
+    2000..2022.  Used to compute the benchmark 'historical continuation'
+    growth rates for the scenario-comparison tab."""
+    return pd.read_parquet(DATA_DIR / "historical_2000_2022.parquet")
+
+
+@st.cache_data(show_spinner=False)
+def load_history_country_indices() -> pd.DataFrame:
+    """Historical per-country-year within-country inequality indices
+    (1950..2021), precomputed by scripts/build_history_within_country.py.
+    Returns an empty DataFrame if the file is not yet built — the tab
+    will then show projection years only."""
+    path = DATA_DIR / "history_country_indices.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+# ----------------------------------------------------------------------
+# Cached projection helpers for the "Compare scenarios" tab.
+#
+# These return ONLY the indices DataFrame (no decomposition) because the
+# overlay plot needs just the time series of a single measure.  Much
+# cheaper than run_pipeline, which also computes country-level
+# decomposition.
+# ----------------------------------------------------------------------
+
+def _freeze_spec(spec_dict: dict) -> tuple:
+    """Turn a spec dict (possibly with nested dicts) into a hashable
+    representation so Streamlit's cache can key on it."""
+    def _freeze(v):
+        if isinstance(v, dict):
+            return tuple(sorted((k, _freeze(x)) for k, x in v.items()))
+        return v
+    return tuple(sorted((k, _freeze(v)) for k, v in spec_dict.items()))
+
+
+@st.cache_data(show_spinner="Projecting scenario…")
+def run_indices_only(_spec_key: tuple, spec_dict: dict) -> pd.DataFrame:
+    """Project with a user spec and return the per-year inequality
+    indices.  _spec_key (unused inside) is passed only so Streamlit's
+    cache keys on a hashable tuple."""
+    baseline, regions, wpp, backfill = load_data()
+    spec = GrowthSpec(**spec_dict)
+    panel = project(baseline, regions, wpp, spec, backfill)
+    return indices(panel)
+
+
+@st.cache_data(show_spinner="Projecting benchmark (historical continuation)…")
+def run_indices_benchmark(n_years: int, target_year: int) -> pd.DataFrame:
+    """Project using the benchmark 'historical continuation': per
+    (country, percentile) CAGR over the last `n_years` of WIID applied
+    from 2027 onwards (backfill 2023..2026 unchanged).  Returns the
+    per-year inequality indices."""
+    baseline, regions, wpp, backfill = load_data()
+    hist = load_historical_panel()
+    bench = benchmark_growth(hist, n_years=n_years)
+    # Align percentile columns to int (baseline uses ints).
+    bench.columns = bench.columns.astype(int)
+    # Dummy spec (rates ignored because of the override); target_year matters.
+    dummy = GrowthSpec(mode="uniform", target_year=int(target_year),
+                       uniform_rate=0.0)
+    panel = project(baseline, regions, wpp, dummy, backfill,
+                    post2026_rate=bench)
+    return indices(panel)
+
+
 @st.cache_data(show_spinner="Projecting distribution and computing indices…")
 def run_pipeline(spec_dict: dict) -> dict:
     """Run project + indices + decomposition + by-group summary.
@@ -75,9 +145,14 @@ def run_pipeline(spec_dict: dict) -> dict:
     grp_reg = indices_by_group(panel, regions, "region_wb",   years=yrs)
     grp_inc = indices_by_group(panel, regions, "incomegroup", years=yrs)
 
+    # Per-country-year within-country indices (used by the
+    # "Within-country distributions" tab).
+    c_idx = country_indices(panel)
+
     return {"panel": panel, "indices": idx,
             "between_within": bw,
             "group_region": grp_reg, "group_incgrp": grp_inc,
+            "country_indices": c_idx,
             "target_year": spec.target_year}
 
 
@@ -122,15 +197,13 @@ with st.sidebar:
     mode_label = st.radio(
         "Mode",
         ["A. Uniform world growth",
-         "B. By World Bank region",
-         "B. By World Bank income group",
+         "B. By country aggregate",
          "C. By population group (B40 / M50 / T10)",
-         "D. By region × population group",
-         "D. By income group × population group"],
+         "D. By country aggregate × population group"],
         index=0,
         help=(
             "A — same rate for every (country, percentile). "
-            "B — per-region or per-income-group rate, same across "
+            "B — per-aggregate rate (region or income group), same across "
             "percentiles within a country. "
             "C — three rates (B40, M50, T10) applied to every country. "
             "D — three rates per aggregate (region or income group). "
@@ -138,12 +211,26 @@ with st.sidebar:
         ),
     )
 
+    # Aggregation dimension shared by Modes B and D.  A single radio, shown
+    # only when the chosen mode uses it.  Default = region.
+    if mode_label.startswith(("B.", "D.")):
+        agg_choice = st.radio(
+            "Aggregation",
+            ["By World Bank region", "By World Bank income group"],
+            index=0, key="sidebar_agg",
+            help="Defines the 'country aggregate' used by Modes B and D.",
+        )
+    else:
+        agg_choice = "By World Bank region"
+    aggregate_sidebar = ("region_wb" if agg_choice == "By World Bank region"
+                         else "incomegroup")
+
     st.markdown("---")
     # Default fallback rate, shown in all modes (used as baseline and as
     # fallback for any group or block without an explicit rate).
     base_rate_pct = st.number_input(
         "Baseline annual growth rate (%)",
-        min_value=-5.0, max_value=15.0, value=3.0, step=0.1,
+        min_value=-99.0, value=3.0, step=0.1,
         help="Applied uniformly in Mode A, and as the default for "
              "group / block rates in the other modes.",
     )
@@ -157,22 +244,22 @@ with st.sidebar:
     aggregate = "region_wb"
 
     # --- Mode B ---
-    if mode_label == "B. By World Bank region":
-        aggregate = "region_wb"
-        st.subheader("Rates by region (%)")
-        for r in REGIONS:
-            rates_by_group[r] = st.number_input(
-                r, min_value=-5.0, max_value=15.0,
-                value=base_rate_pct, step=0.1, key=f"reg_{r}"
-            ) / 100.0
-    elif mode_label == "B. By World Bank income group":
-        aggregate = "incomegroup"
-        st.subheader("Rates by income group (%)")
-        for g in INCOMEGROUPS:
-            rates_by_group[g] = st.number_input(
-                g, min_value=-5.0, max_value=15.0,
-                value=base_rate_pct, step=0.1, key=f"ig_{g}"
-            ) / 100.0
+    if mode_label.startswith("B."):
+        aggregate = aggregate_sidebar
+        if aggregate == "region_wb":
+            st.subheader("Rates by region (%)")
+            for r in REGIONS:
+                rates_by_group[r] = st.number_input(
+                    r, min_value=-99.0,
+                    value=base_rate_pct, step=0.1, key=f"reg_{r}"
+                ) / 100.0
+        else:
+            st.subheader("Rates by income group (%)")
+            for g in INCOMEGROUPS:
+                rates_by_group[g] = st.number_input(
+                    g, min_value=-99.0,
+                    value=base_rate_pct, step=0.1, key=f"ig_{g}"
+                ) / 100.0
 
     # --- Mode C ---
     elif mode_label.startswith("C."):
@@ -184,20 +271,20 @@ with st.sidebar:
         )
         block_rates["b40"] = st.number_input(
             "Bottom 40 %",  value=base_rate_pct, step=0.1,
-            min_value=-5.0, max_value=15.0, key="c_b40") / 100.0
+            min_value=-99.0, key="c_b40") / 100.0
         block_rates["m50"] = st.number_input(
             "Middle 50 %",  value=base_rate_pct, step=0.1,
-            min_value=-5.0, max_value=15.0, key="c_m50") / 100.0
+            min_value=-99.0, key="c_m50") / 100.0
         block_rates["t10"] = st.number_input(
             "Top 10 %",     value=base_rate_pct, step=0.1,
-            min_value=-5.0, max_value=15.0, key="c_t10") / 100.0
+            min_value=-99.0, key="c_t10") / 100.0
 
     # --- Mode D ---
     # Inputs for Mode D are a (groups × 3 blocks) table, which does not
     # fit in the narrow sidebar.  We set the aggregate here, but the
     # editable table is rendered in the main pane below.
     elif mode_label.startswith("D."):
-        aggregate = "region_wb" if "region" in mode_label else "incomegroup"
+        aggregate = aggregate_sidebar
         st.info("Edit the group × block rates table in the main pane.")
 
     # ------------------------------------------------------------------
@@ -220,11 +307,11 @@ with st.sidebar:
         # Modes A / B: a single scalar per giant.
         china_rate = st.number_input(
             "China rate (%)", value=base_rate_pct, step=0.1,
-            min_value=-5.0, max_value=15.0,
+            min_value=-99.0,
             disabled=not split_china, key="cn") / 100.0
         india_rate = st.number_input(
             "India rate (%)", value=base_rate_pct, step=0.1,
-            min_value=-5.0, max_value=15.0,
+            min_value=-99.0,
             disabled=not split_india, key="in") / 100.0
     else:
         # Modes C / D: 3 block rates per giant (shown only when enabled).
@@ -232,24 +319,24 @@ with st.sidebar:
             st.caption("China block rates (%)")
             china_block_rates["b40"] = st.number_input(
                 "China B40", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="cn_b40") / 100.0
+                min_value=-99.0, key="cn_b40") / 100.0
             china_block_rates["m50"] = st.number_input(
                 "China M50", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="cn_m50") / 100.0
+                min_value=-99.0, key="cn_m50") / 100.0
             china_block_rates["t10"] = st.number_input(
                 "China T10", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="cn_t10") / 100.0
+                min_value=-99.0, key="cn_t10") / 100.0
         if split_india:
             st.caption("India block rates (%)")
             india_block_rates["b40"] = st.number_input(
                 "India B40", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="in_b40") / 100.0
+                min_value=-99.0, key="in_b40") / 100.0
             india_block_rates["m50"] = st.number_input(
                 "India M50", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="in_m50") / 100.0
+                min_value=-99.0, key="in_m50") / 100.0
             india_block_rates["t10"] = st.number_input(
                 "India T10", value=base_rate_pct, step=0.1,
-                min_value=-5.0, max_value=15.0, key="in_t10") / 100.0
+                min_value=-99.0, key="in_t10") / 100.0
 
 # ------------------------------------------------------------------
 # Mode D main-pane table (needs more width than the sidebar offers).
@@ -281,13 +368,13 @@ if mode_label.startswith("D."):
             num_rows="fixed",
             column_config={
                 "b40": st.column_config.NumberColumn("Bottom 40 %", step=0.1,
-                                                    min_value=-5.0, max_value=15.0,
+                                                    min_value=-99.0,
                                                     format="%.2f"),
                 "m50": st.column_config.NumberColumn("Middle 50 %", step=0.1,
-                                                    min_value=-5.0, max_value=15.0,
+                                                    min_value=-99.0,
                                                     format="%.2f"),
                 "t10": st.column_config.NumberColumn("Top 10 %",    step=0.1,
-                                                    min_value=-5.0, max_value=15.0,
+                                                    min_value=-99.0,
                                                     format="%.2f"),
             },
             use_container_width=True,
@@ -371,9 +458,12 @@ BACKFILL_START   = 2023   # first year of WDI/WEO backfill
 # Main pane — charts and tables
 # ======================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Inequality measures", "Group shares & Palma",
-     "Within / between decomposition", "Summary table"]
+     "Within / between decomposition",
+     "Within-country distributions",
+     "Summary table",
+     "Compare scenarios"]
 )
 
 # ---- Tab 1: inequality measures over time ----
@@ -556,8 +646,183 @@ with tab3:
             st.plotly_chart(_bw_fig_shapley(bw_plot, m, label),
                             use_container_width=True)
 
-# ---- Tab 4: summary table (2022 → target year) ----
+# ---- Tab 4: within-country distributions ----
+# Average (across countries) of a within-country inequality indicator,
+# plotted for the World + the 7 WB regions (or 4 WB income groups).
+# The indicator is computed separately for each country from its 100
+# percentile incomes (within-country inequality only — no between
+# component), then averaged across countries using either country
+# populations as weights (default) or a simple unweighted mean.
 with tab4:
+    st.caption(
+        "Average **within-country** inequality across countries. "
+        "For each country we compute the indicator on its 100 percentile "
+        "incomes (so this measures inequality *inside* countries only, "
+        "ignoring between-country differences), then we average across "
+        "countries — by default weighting each country by its total "
+        "population. Unweighted shows each country counting equally."
+    )
+
+    MEASURE_CHOICES_WITHIN = [
+        ("gini",      "Gini"),
+        ("ge0",       "MLD (GE0)"),
+        ("ge1",       "Theil (GE1)"),
+        ("ge_m1",     "GE(-1)"),
+        ("ge2",       "GE(2)"),
+        ("atk_050",   "Atkinson(0.5)"),
+        ("atk_1",     "Atkinson(1)"),
+        ("atk_2",     "Atkinson(2)"),
+        ("palma",     "Palma ratio (T10/B40)"),
+        ("s80s20",    "S80/S20"),
+        ("bottom40",  "Bottom 40 share"),
+        ("top10",     "Top 10 share"),
+        ("mean_income", "Mean income (PPP 2017 USD)"),
+    ]
+    MEASURE_KEY_TO_LABEL_W = dict(MEASURE_CHOICES_WITHIN)
+
+    col_w1, col_w2, col_w3 = st.columns([2, 1, 1])
+    with col_w1:
+        within_measure_label = st.selectbox(
+            "Indicator",
+            [lbl for _, lbl in MEASURE_CHOICES_WITHIN],
+            index=0, key="within_measure",
+        )
+        within_measure = next(k for k, lbl in MEASURE_CHOICES_WITHIN
+                              if lbl == within_measure_label)
+    with col_w2:
+        within_weighted = st.checkbox(
+            "Population-weighted", value=True, key="within_weighted",
+            help="ON (default): each country's contribution is scaled by "
+                 "its total population. OFF: simple mean, every country "
+                 "counts equally.",
+        )
+    with col_w3:
+        within_agg_label = st.selectbox(
+            "Aggregation",
+            ["By World Bank region", "By World Bank income group"],
+            index=0, key="within_agg",
+        )
+    within_agg = ("region_wb" if within_agg_label == "By World Bank region"
+                  else "incomegroup")
+
+    # ---- Build a combined (historical + projected) per-country table ----
+    c_idx_proj = result["country_indices"]      # 2022..target, from pipeline
+    c_idx_hist = load_history_country_indices()  # 1950..2021, precomputed
+
+    # Keep only years >= history_from_year on the history side (and drop
+    # 2022 if it's there — it belongs to projection).
+    if len(c_idx_hist):
+        c_idx_hist = c_idx_hist[
+            (c_idx_hist["year"] >= history_from_year) &
+            (c_idx_hist["year"] < 2022)
+        ]
+
+    # Attach region / incomegroup label.
+    reg_map = regions.set_index("c3")[within_agg]
+    c_all = pd.concat([c_idx_hist, c_idx_proj], ignore_index=True)
+    c_all["_g"] = c_all["c3"].map(reg_map)
+    c_all = c_all.dropna(subset=[within_measure, "_g", "population"])
+
+    # ---- Aggregate by group x year (World, and per-group). ----------------
+    def _aggregate(df: pd.DataFrame, measure: str, weighted: bool,
+                   group_col: str | None) -> pd.DataFrame:
+        """Return a long DataFrame (year, group, value) with the
+        cross-country mean of `measure`.  If `group_col` is None the
+        aggregation is over all countries (World)."""
+        keys = ["year"] + ([group_col] if group_col else [])
+        grouped = df.groupby(keys, sort=True)
+        if weighted:
+            # Weighted mean: sum(pop * x) / sum(pop)
+            num = grouped.apply(
+                lambda s: (s[measure] * s["population"]).sum()
+                          / s["population"].sum(),
+                include_groups=False,
+            )
+        else:
+            num = grouped[measure].mean()
+        out = num.reset_index(name="value")
+        if group_col is None:
+            out["group"] = "World"
+        else:
+            out = out.rename(columns={group_col: "group"})
+        return out[["year", "group", "value"]]
+
+    world_df = _aggregate(c_all, within_measure, within_weighted, None)
+    grp_df   = _aggregate(c_all, within_measure, within_weighted, "_g")
+
+    plot_df = pd.concat([world_df, grp_df], ignore_index=True)
+
+    # ---- Build the figure -------------------------------------------------
+    # Scale income-shares to % for a friendlier display.
+    def _scale(v: pd.Series) -> pd.Series:
+        if within_measure in ("bottom40", "top10"):
+            return v * 100.0
+        return v
+
+    fig = go.Figure()
+
+    # World as a thicker black line (always first so it sits on top).
+    w = plot_df[plot_df["group"] == "World"].sort_values("year")
+    fig.add_trace(go.Scatter(
+        x=w["year"], y=_scale(w["value"]),
+        mode="lines", name="World",
+        line=dict(color="black", width=3),
+    ))
+
+    # Fixed color palette for the groups.
+    palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
+               "#ff7f0e", "#17becf", "#e377c2", "#bcbd22"]
+    if within_agg == "region_wb":
+        group_order = REGIONS
+    else:
+        group_order = INCOMEGROUPS
+    for i, g in enumerate(group_order):
+        sub = plot_df[plot_df["group"] == g].sort_values("year")
+        if not len(sub):
+            continue
+        fig.add_trace(go.Scatter(
+            x=sub["year"], y=_scale(sub["value"]),
+            mode="lines", name=g,
+            line=dict(color=palette[i % len(palette)], width=2),
+        ))
+
+    # Backfill band + user-projection start line (same as other tabs).
+    fig.add_vrect(
+        x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+        fillcolor="lightgrey", opacity=0.25, line_width=0,
+        annotation_text="Backfill (WDI/WEO)",
+        annotation_position="top left",
+    )
+    fig.add_vline(
+        x=PROJECTION_START, line_dash="dash", line_color="grey",
+        annotation_text="User projection →", annotation_position="top",
+    )
+
+    y_title = MEASURE_KEY_TO_LABEL_W[within_measure]
+    if within_measure in ("bottom40", "top10"):
+        y_title += " (%)"
+
+    wt_tag = "population-weighted" if within_weighted else "unweighted"
+    fig.update_layout(
+        title=f"Average within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
+              f"({wt_tag}), {history_from_year} → {target_year}",
+        xaxis=dict(title="Year", dtick=5),
+        yaxis=dict(title=y_title, rangemode="tozero"),
+        legend=dict(orientation="h", y=-0.2),
+        height=520,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if not len(c_idx_hist):
+        st.info(
+            "Historical per-country indices not yet built — showing "
+            "projection years only.  Run "
+            "`python scripts/build_history_within_country.py` from the "
+            "project root to precompute 1950–2021."
+        )
+
+# ---- Tab 5: summary table (2022 → target year) ----
+with tab5:
     tgt = result["target_year"]
     st.subheader(f"Change in inequality: 2022 → {tgt}")
 
@@ -596,6 +861,292 @@ with tab4:
 
     st.markdown("**By income group (within-group inequality)**")
     st.dataframe(w_inc, use_container_width=True)
+
+# ---- Tab 6: scenario comparison ----
+# Not available for Mode A (a single world rate has nothing meaningful
+# to compare — saving a second 'scenario' would differ only in that rate,
+# which is easier to eyeball in Tab 1).
+#
+# Available scenarios to overlay on a single-indicator plot:
+#   (a) Current scenario   — whatever the user has chosen in the sidebar.
+#   (b) Benchmark           — historical continuation: per-(c3, percentile)
+#                              CAGR over the last N years of WIID applied
+#                              from 2027 onwards (backfill unchanged).
+#                              Optional (checkbox); default ON.
+#   (c) Saved scenarios     — the user can save the current spec under a
+#                              name; saved scenarios persist for the
+#                              browser session and are per-mode (a
+#                              scenario saved in Mode C is only listed in
+#                              Mode C's comparison).
+MEASURE_CHOICES = [
+    ("gini",      "Gini"),
+    ("ge0",       "MLD (GE0)"),
+    ("ge1",       "Theil (GE1)"),
+    ("ge_m1",     "GE(-1)"),
+    ("ge2",       "GE(2)"),
+    ("atk_050",   "Atkinson(0.5)"),
+    ("atk_1",     "Atkinson(1)"),
+    ("atk_2",     "Atkinson(2)"),
+    ("palma",     "Palma ratio (T10/B40)"),
+    ("s80s20",    "S80/S20"),
+    ("bottom40",  "Bottom 40 share"),
+    ("top10",     "Top 10 share"),
+    ("mean_income", "Mean income (PPP 2017 USD)"),
+]
+MEASURE_KEY_TO_LABEL = dict(MEASURE_CHOICES)
+
+with tab6:
+    if mode == "uniform":
+        st.info(
+            "Scenario comparison is only meaningful in Modes B, C, and D "
+            "(where growth varies across countries, groups, or population "
+            "blocks). Pick a different mode in the sidebar to use this tab."
+        )
+    else:
+        st.caption(
+            "Compare the evolution of a single inequality indicator under "
+            "the current scenario, a historical-continuation benchmark, "
+            "and any scenarios you save from the sidebar. Saved scenarios "
+            "persist for this browser session and are kept separately per "
+            "mode."
+        )
+
+        # Session-state keys — per-mode so saved scenarios don't bleed
+        # across incompatible specs (a Mode-C spec has 3 block rates,
+        # Mode-D has a matrix, etc.).
+        scen_key = f"scenarios_{mode}"
+        if scen_key not in st.session_state:
+            st.session_state[scen_key] = []   # list of (name, spec_dict)
+
+        col_top1, col_top2, col_top3 = st.columns([2, 1, 1])
+        with col_top1:
+            measure_label = st.selectbox(
+                "Indicator",
+                [label for _, label in MEASURE_CHOICES],
+                index=0,    # default Gini
+            )
+            measure = next(k for k, lbl in MEASURE_CHOICES
+                           if lbl == measure_label)
+        with col_top2:
+            include_benchmark = st.checkbox(
+                "Include benchmark",
+                value=True,
+                help="Historical continuation: each (country, percentile) "
+                     "is projected at its own compound annual growth rate "
+                     "over the last N years of WIID (default N=10).",
+            )
+        with col_top3:
+            bench_n_years = st.slider(
+                "Benchmark window (years)", 5, 20, 10, step=1,
+                help="Length of the WIID window used to estimate the "
+                     "per-(country, percentile) CAGR for the benchmark.",
+            )
+
+        # ---- Save / clear controls ---------------------------------------
+        st.markdown("**Saved scenarios**")
+        col_s1, col_s2, col_s3 = st.columns([3, 1, 1])
+        with col_s1:
+            new_name = st.text_input(
+                "Name", value="",
+                placeholder=f"e.g. 'convergence' or 'SSA high growth'",
+                label_visibility="collapsed",
+            )
+        with col_s2:
+            save_clicked = st.button("Save current scenario",
+                                     use_container_width=True)
+        with col_s3:
+            clear_clicked = st.button("Clear all", type="secondary",
+                                      use_container_width=True)
+
+        if save_clicked:
+            if not new_name.strip():
+                st.warning("Please type a name before saving.")
+            else:
+                existing_names = {n for n, _ in st.session_state[scen_key]}
+                if new_name.strip() in existing_names:
+                    st.warning(f"A scenario named {new_name.strip()!r} "
+                               "already exists in this mode.")
+                else:
+                    # Copy the spec dict so later sidebar edits don't mutate
+                    # the saved scenario.
+                    import copy
+                    st.session_state[scen_key].append(
+                        (new_name.strip(), copy.deepcopy(spec_dict))
+                    )
+                    st.rerun()
+        if clear_clicked:
+            st.session_state[scen_key] = []
+            st.rerun()
+
+        saved = st.session_state[scen_key]
+        if saved:
+            saved_names = [n for n, _ in saved]
+            selected_names = st.multiselect(
+                "Show on chart:",
+                options=saved_names,
+                default=saved_names,
+            )
+        else:
+            selected_names = []
+            st.caption("No saved scenarios yet. Configure the sidebar and "
+                       "click *Save current scenario* to add one.")
+
+        # ---- Build the overlay figure ------------------------------------
+        fig = go.Figure()
+
+        # Scale the series for a couple of measures where a friendlier
+        # display makes sense (percentage shares).
+        def _yvals(df, m):
+            v = df[m]
+            if m in ("bottom40", "top10"):
+                return v * 100.0
+            return v
+
+        # Historical segment (history_from_year .. 2021) drawn once as a
+        # thin grey line.  Every scenario shares the same history by
+        # construction, so we do not repeat it for each curve.
+        if measure in history.columns:
+            hist_seg = history[
+                (history["year"] >= history_from_year) &
+                (history["year"] <= 2021)
+            ]
+            if len(hist_seg):
+                fig.add_trace(go.Scatter(
+                    x=hist_seg["year"], y=_yvals(hist_seg, measure),
+                    mode="lines", name="Historical (WIID)",
+                    line=dict(color="#7f7f7f", width=1.5),
+                ))
+
+        # (a) Current scenario (already computed in run_pipeline).
+        fig.add_trace(go.Scatter(
+            x=idx["year"], y=_yvals(idx, measure),
+            mode="lines", name="Current scenario",
+            line=dict(color="black", width=3),
+        ))
+
+        # (b) Benchmark.
+        if include_benchmark:
+            bench_idx = run_indices_benchmark(int(bench_n_years),
+                                              int(target_year))
+            fig.add_trace(go.Scatter(
+                x=bench_idx["year"], y=_yvals(bench_idx, measure),
+                mode="lines",
+                name=f"Benchmark (hist. continuation, N={bench_n_years})",
+                line=dict(color="#7f7f7f", width=2, dash="dash"),
+            ))
+
+        # (c) Saved scenarios the user picked.
+        palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
+                   "#ff7f0e", "#17becf", "#e377c2", "#bcbd22"]
+        for i, name in enumerate(selected_names):
+            spec_d = dict(next(s for n, s in saved if n == name))
+            # Force all saved scenarios to use the CURRENT target year so
+            # all curves cover the same horizon on the chart.
+            spec_d["target_year"] = int(target_year)
+            scen_idx = run_indices_only(_freeze_spec(spec_d), spec_d)
+            fig.add_trace(go.Scatter(
+                x=scen_idx["year"], y=_yvals(scen_idx, measure),
+                mode="lines", name=name,
+                line=dict(color=palette[i % len(palette)], width=2),
+            ))
+
+        # Backfill band + projection start line — same look as other tabs.
+        fig.add_vrect(
+            x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
+            fillcolor="lightgrey", opacity=0.25, line_width=0,
+            annotation_text="Backfill (WDI/WEO)",
+            annotation_position="top left",
+        )
+        fig.add_vline(
+            x=PROJECTION_START, line_dash="dash", line_color="grey",
+            annotation_text="User projection →", annotation_position="top",
+        )
+
+        y_axis_title = MEASURE_KEY_TO_LABEL[measure]
+        if measure in ("bottom40", "top10"):
+            y_axis_title += " (%)"
+
+        fig.update_layout(
+            title=f"{MEASURE_KEY_TO_LABEL[measure]}: scenario comparison",
+            xaxis=dict(title="Year", dtick=5),
+            yaxis=dict(title=y_axis_title, rangemode="tozero"),
+            legend=dict(orientation="h", y=-0.2),
+            height=520,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Small table with the saved-scenario specs, so users can remember
+        # what each saved name stood for.
+        if saved:
+            with st.expander("Saved-scenario details", expanded=True):
+                # Human-readable summary of each saved scenario.  One line
+                # per scenario, listing the rates that actually drive the
+                # projection (base rate + mode-specific rates + giants).
+                MODE_LABELS = {
+                    "uniform": "A — uniform",
+                    "by_aggregate": "B — by aggregate",
+                    "by_popgroup":  "C — by population group",
+                    "by_aggregate_popgroup": "D — by aggregate × block",
+                }
+
+                def _fmt_pct(x: float) -> str:
+                    return f"{x * 100:.2f}%"
+
+                def _describe(s: dict) -> str:
+                    parts: list[str] = []
+                    m = s.get("mode")
+                    parts.append(f"Base rate {_fmt_pct(s.get('uniform_rate', 0.0))}")
+                    if m == "by_aggregate":
+                        agg = s.get("aggregate", "region_wb")
+                        rbg = s.get("rates_by_group") or {}
+                        if rbg:
+                            label = "region" if agg == "region_wb" else "income group"
+                            per_grp = ", ".join(f"{g}={_fmt_pct(r)}"
+                                                for g, r in rbg.items())
+                            parts.append(f"by {label}: {per_grp}")
+                    elif m == "by_popgroup":
+                        br = s.get("block_rates") or {}
+                        if br:
+                            parts.append("blocks: "
+                                         + ", ".join(f"{b}={_fmt_pct(r)}"
+                                                     for b, r in br.items()))
+                    elif m == "by_aggregate_popgroup":
+                        agg = s.get("aggregate", "region_wb")
+                        brg = s.get("block_rates_by_group") or {}
+                        if brg:
+                            label = "region" if agg == "region_wb" else "income group"
+                            # Compact: "SSA (b40=2%, m50=3%, t10=4%); …"
+                            groups_desc = []
+                            for g, blocks in brg.items():
+                                bd = ", ".join(f"{b}={_fmt_pct(r)}"
+                                               for b, r in blocks.items())
+                                groups_desc.append(f"{g} ({bd})")
+                            parts.append(f"by {label} × block: "
+                                         + "; ".join(groups_desc))
+                    # Giants
+                    if s.get("split_china"):
+                        if s.get("china_block_rates"):
+                            bd = ", ".join(f"{b}={_fmt_pct(r)}"
+                                           for b, r in s["china_block_rates"].items())
+                            parts.append(f"China ({bd})")
+                        else:
+                            parts.append(f"China={_fmt_pct(s.get('china_rate', 0.0))}")
+                    if s.get("split_india"):
+                        if s.get("india_block_rates"):
+                            bd = ", ".join(f"{b}={_fmt_pct(r)}"
+                                           for b, r in s["india_block_rates"].items())
+                            parts.append(f"India ({bd})")
+                        else:
+                            parts.append(f"India={_fmt_pct(s.get('india_rate', 0.0))}")
+                    return " · ".join(parts)
+
+                rows = [{"Name":  n,
+                         "Mode":  MODE_LABELS.get(s.get("mode"), s.get("mode")),
+                         "Rates": _describe(s)}
+                        for n, s in saved]
+                st.dataframe(pd.DataFrame(rows),
+                             hide_index=True,
+                             use_container_width=True)
 
 
 # ======================================================================
