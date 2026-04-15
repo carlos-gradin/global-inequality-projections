@@ -131,7 +131,7 @@ story.append(P(
     f"the UNU-WIDER {_link('World Income Inequality Database (WIID)', URL_WIID)}, "
     "restricted to the 2022 country cross-section. Each country is "
     "represented by 100 percentile observations of per capita household "
-    "income (PPP-adjusted, 2017 USD). Only genuine countries are kept "
+    "income (PPP-adjusted, 2021 USD). Only genuine countries are kept "
     "(ISO3 code of length 3); pre-aggregated regional rows in WIID are "
     "discarded. Region (World Bank) and income-group codes are decoded "
     "via the Stata value labels exposed by pyreadstat. The resulting "
@@ -426,7 +426,7 @@ story.append(BUL(
     "uniformly inside every country."
 ))
 story.append(BUL(
-    "Income units: PPP-adjusted 2017 USD per capita, consistent with "
+    "Income units: PPP-adjusted 2021 USD per capita, consistent with "
     "the WIID baseline. Growth rates applied to the distribution are "
     "real (inflation already removed in the sources)."
 ))

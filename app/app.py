@@ -720,7 +720,7 @@ with tab4:
         ("s80s20",    "S80/S20"),
         ("bottom40",  "Bottom 40 share"),
         ("top10",     "Top 10 share"),
-        ("mean_income", "Mean income (PPP 2017 USD)"),
+        ("mean_income", "Mean income (PPP 2021 USD)"),
     ]
     MEASURE_KEY_TO_LABEL_W = dict(MEASURE_CHOICES_WITHIN)
 
@@ -1017,7 +1017,7 @@ MEASURE_CHOICES = [
     ("s80s20",    "S80/S20"),
     ("bottom40",  "Bottom 40 share"),
     ("top10",     "Top 10 share"),
-    ("mean_income", "Mean income (PPP 2017 USD)"),
+    ("mean_income", "Mean income (PPP 2021 USD)"),
 ]
 MEASURE_KEY_TO_LABEL = dict(MEASURE_CHOICES)
 
