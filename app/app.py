@@ -791,14 +791,6 @@ with tab4:
 
     fig = go.Figure()
 
-    # World as a thicker black line (always first so it sits on top).
-    w = plot_df[plot_df["group"] == "World"].sort_values("year")
-    fig.add_trace(go.Scatter(
-        x=w["year"], y=_scale(w["value"]),
-        mode="lines", name="World",
-        line=dict(color="black", width=3),
-    ))
-
     # Fixed color palette for the groups.
     palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
                "#ff7f0e", "#17becf", "#e377c2", "#bcbd22"]
@@ -809,14 +801,25 @@ with tab4:
         group_order = INCOMEGROUPS
         group_kind  = "income groups"
 
-    # Let the user add / remove groups on the chart (default: all).
+    # Let the user add / remove groups on the chart (default: all +
+    # World). "World" is a cross-country average over all countries.
+    options_with_world = ["World"] + list(group_order)
     selected_groups = st.multiselect(
-        f"Show {group_kind} on chart",
-        options=group_order,
-        default=group_order,
+        f"Show World / {group_kind} on chart",
+        options=options_with_world,
+        default=options_with_world,
         key=f"within_groups_{within_agg}",
-        help="World line is always shown. Add or remove groups here.",
     )
+
+    # Draw World first (as a thicker black line) so it sits on top.
+    if "World" in selected_groups:
+        w = plot_df[plot_df["group"] == "World"].sort_values("year")
+        fig.add_trace(go.Scatter(
+            x=w["year"], y=_scale(w["value"]),
+            mode="lines", name="World",
+            line=dict(color="black", width=3),
+        ))
+
     for i, g in enumerate(group_order):
         if g not in selected_groups:
             continue
