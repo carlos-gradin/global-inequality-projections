@@ -194,9 +194,7 @@ def _percentile_growth_rates(regions: pd.DataFrame,
 # Step 2: project the income panel
 # ======================================================================
 
-BASE_YEAR             = 2022      # WIID cross-section year
-BACKFILL_END_YEAR     = 2026      # last year covered by WDI / WEO backfill
-PROJECTION_START_YEAR = 2027      # first year of USER-driven growth
+BASE_YEAR = 2022
 
 
 def project(
@@ -204,7 +202,6 @@ def project(
     regions:  pd.DataFrame,
     wpp:      pd.DataFrame,
     spec:     GrowthSpec,
-    backfill: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Produce a long panel with one row per (c3, year, percentile) covering
@@ -212,78 +209,44 @@ def project(
 
         c3, year, percentile, income_level, weight
 
-    Two phases:
-        2023..2026  "backfill": per-country annual growth rate taken from
-                    `backfill` (WDI realised + IMF WEO April 2026, see
-                    scripts/build_backfill.py). Applied UNIFORMLY across
-                    the 100 percentiles of each country, so within-country
-                    distribution shape is held constant during backfill
-                    years (consistent with Gradín 2024 and Kanbur,
-                    Ortiz-Juarez & Sumner 2024).
-        2027..target "projection": user-chosen growth pattern from `spec`,
-                     identical to the original behaviour.
-
     `weight` is the population of the percentile in that year (people),
     i.e. country_population * 0.01 .
     """
     if spec.target_year <= BASE_YEAR:
         raise ValueError(f"target_year must be > {BASE_YEAR}")
 
-    # User-driven annualised growth rate per (country, percentile).
-    # Used only from PROJECTION_START_YEAR onwards.
-    spec_rate = _percentile_growth_rates(regions, spec)             # c3 × 1..100
+    # Annualised growth rate per (country, percentile).  In modes A & B
+    # the rate is the same across percentiles within a country; in modes
+    # C & D it varies by population block.
+    rate = _percentile_growth_rates(regions, spec)                  # c3 × 1..100
 
     # Reshape baseline to wide: rows = c3, cols = percentile 1..100.
     base_wide = (
         baseline.pivot(index="c3", columns="percentile", values="income_level")
         .sort_index()
     )
-    # Align everything on the same countries & percentile columns.
-    common    = base_wide.index.intersection(spec_rate.index)
+    # Align rate and baseline on the same countries & percentile columns.
+    common = base_wide.index.intersection(rate.index)
     base_wide = base_wide.loc[common]
-    spec_rate = spec_rate.loc[common, base_wide.columns]
+    rate      = rate.loc[common, base_wide.columns]
 
-    # Backfill lookup: c3 × year matrix of per-country scalar rates.
-    # Any country missing from backfill will get 0% growth for those years
-    # (defensive — build_backfill.py should leave no gaps).
-    bf_wide = (
-        backfill.pivot(index="c3", columns="year", values="growth_rate")
-        .reindex(base_wide.index)
-        .fillna(0.0)
-    )
+    # Pull numpy views for speed.
+    base_arr = base_wide.to_numpy()
+    rate_arr = rate.to_numpy()
 
-    c3_idx     = base_wide.index
-    perc_cols  = base_wide.columns
-    n          = len(c3_idx)
-    spec_arr   = spec_rate.to_numpy()                               # n × 100
+    years = np.arange(BASE_YEAR, spec.target_year + 1)
 
-    # --- iterative income-level build -------------------------------------
-    # We loop year-by-year because growth rates now vary across years in
-    # the backfill phase (no closed-form exponent).
-    inc_curr = base_wide.to_numpy().astype(float)                   # 2022 levels
-    frames   = []
-
-    def _frame(arr: np.ndarray, year: int) -> pd.DataFrame:
-        df = pd.DataFrame(arr, index=c3_idx, columns=perc_cols)
-        f  = df.stack().rename("income_level").reset_index()
-        f["year"] = int(year)
-        return f
-
-    # Emit 2022 (baseline) first.
-    frames.append(_frame(inc_curr, BASE_YEAR))
-
-    for t in range(BASE_YEAR + 1, spec.target_year + 1):
-        if t <= BACKFILL_END_YEAR:
-            # Backfill: country-scalar rate broadcast across all 100 percentiles.
-            country_rate = (bf_wide[t].to_numpy() if t in bf_wide.columns
-                            else np.zeros(n))
-            rate_arr = np.broadcast_to(country_rate[:, None], (n, 100))
-        else:
-            # User-driven: may vary by percentile within country.
-            rate_arr = spec_arr
-        inc_curr = inc_curr * (1.0 + rate_arr)
-        frames.append(_frame(inc_curr, t))
-
+    # --- build the income-level panel -------------------------------------
+    # income_{c,p,t} = income_{c,p,2022} * (1 + g_{c,p})^(t - 2022)
+    frames = []
+    for t in years:
+        factor = (1.0 + rate_arr) ** (t - BASE_YEAR)          # (n, 100)
+        inc_arr = base_arr * factor
+        inc = pd.DataFrame(inc_arr, index=base_wide.index,
+                           columns=base_wide.columns)
+        f = inc.stack().rename("income_level").reset_index()
+        f["year"] = int(t)
+        frames.append(f)
     panel = pd.concat(frames, ignore_index=True)
 
     # --- attach population weights ----------------------------------------
