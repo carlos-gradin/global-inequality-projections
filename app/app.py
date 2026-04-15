@@ -205,6 +205,20 @@ INCOMEGROUPS = ["Low income", "Lower middle income",
                 "Upper middle income", "High income"]   # fixed order
 
 with st.sidebar:
+    # Technical-note download link (PDF shipped with the app).
+    _tn_path = DATA_DIR / "technical_note.pdf"
+    if _tn_path.exists():
+        with open(_tn_path, "rb") as _f:
+            st.download_button(
+                label="📄 Download technical note (PDF)",
+                data=_f.read(),
+                file_name="Technical note - Global inequality projections.pdf",
+                mime="application/pdf",
+                help="Methodology, data sources, and assumptions behind the "
+                     "projections.",
+                use_container_width=True,
+            )
+
     st.header("Chart range")
     # History start year — only controls how much historical context is
     # shown on the charts; it does NOT affect the projection, which

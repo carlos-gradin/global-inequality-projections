@@ -1,0 +1,6 @@
+*.pdf binary
+*.parquet binary
+*.xlsx binary
+*.xls binary
+*.dta binary
+*.zip binary
