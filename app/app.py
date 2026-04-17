@@ -31,6 +31,33 @@ from engine import (GrowthSpec, project, indices, indices_by_group,
                     historical_default_rates, imf_default_rates)
 
 # ----------------------------------------------------------------------
+# Chart x-axis helper
+# ----------------------------------------------------------------------
+
+def _year_ticks(start: int, end: int, step: int = 5) -> list[int]:
+    """Return explicit tick values from *start* to *end* (inclusive),
+    snapped to multiples of *step*, always including *end* itself."""
+    first = start if start % step == 0 else start + (step - start % step)
+    ticks = list(range(first, end + 1, step))
+    if ticks and ticks[-1] != end:
+        ticks.append(end)
+    return ticks
+
+
+def _xaxis(start: int, end: int) -> dict:
+    """Standard x-axis dict for all time-series charts.
+
+    Uses tickmode='array' with explicit tickvals so the target year
+    always appears as a labelled tick, regardless of Plotly auto-range."""
+    return dict(
+        title="Year",
+        tickmode="array",
+        tickvals=_year_ticks(start, end),
+        range=[start - 1, end + 1],
+    )
+
+
+# ----------------------------------------------------------------------
 # Paths & data loading (cached — only re-reads on file change).
 # ----------------------------------------------------------------------
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -717,8 +744,7 @@ with tab1:
     fig.update_layout(
         title=f"Global inequality, {history_from_year} → {target_year}",
         # dtick=5 -> a tick label every 5 years (1950, 1955, ...).
-        xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),
+        xaxis=_xaxis(history_from_year, target_year),
         yaxis=dict(title="Gini / MLD / Theil", rangemode="tozero",
                    hoverformat=".3f"),
         yaxis2=dict(title="GE(2)", overlaying="y", side="right",
@@ -753,8 +779,7 @@ with tab2:
     )
     fig.update_layout(
         title="Population-group income shares and Palma ratio",
-        xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),          # tick every 5 years
+        xaxis=_xaxis(history_from_year, target_year),          # tick every 5 years
         # rangemode="tozero" forces the y-axis to start at 0, even if
         # the data minimum is well above zero (e.g. Middle 50 % ~ 40 %).
         yaxis=dict(title="Income share (%)", rangemode="tozero",
@@ -822,8 +847,7 @@ with tab3:
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: naive between/within",
-            xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),      # tick every 5 years
+            xaxis=_xaxis(history_from_year, target_year),      # tick every 5 years
             yaxis=dict(title=label, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=380,
@@ -857,8 +881,7 @@ with tab3:
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: Shapley between/within (sums to total)",
-            xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),      # tick every 5 years
+            xaxis=_xaxis(history_from_year, target_year),      # tick every 5 years
             yaxis=dict(title=label, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=380,
@@ -1050,8 +1073,7 @@ with tab4:
     fig.update_layout(
         title=f"Average within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
               f"({wt_tag}), {history_from_year} → {target_year}",
-        xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),
+        xaxis=_xaxis(history_from_year, target_year),
         yaxis=dict(title=y_title, rangemode="tozero", hoverformat=".3f"),
         legend=dict(orientation="h", y=-0.2),
         height=520,
@@ -1123,8 +1145,7 @@ with tab4:
         fig_c.update_layout(
             title=f"Within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
                   f"by country, {history_from_year} → {target_year}",
-            xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),
+            xaxis=_xaxis(history_from_year, target_year),
             yaxis=dict(title=y_title, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=520,
@@ -1405,8 +1426,7 @@ with tab6:
 
         fig.update_layout(
             title=f"{MEASURE_KEY_TO_LABEL[measure]}: scenario comparison",
-            xaxis=dict(title="Year", dtick=5, tick0=1950,
-                       range=[history_from_year - 1, target_year + 1]),
+            xaxis=_xaxis(history_from_year, target_year),
             yaxis=dict(title=y_axis_title, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=520,
