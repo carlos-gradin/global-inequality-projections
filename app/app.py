@@ -845,8 +845,8 @@ with tab3:
 
     def _bw_fig_naive(df: pd.DataFrame, m: str, label: str) -> go.Figure:
         """Left-hand figure: I(y), I(y^b) and I(y^w) as lines over time."""
-        from plotly.subplots import make_subplots
-        f = make_subplots()
+        ticks = _year_ticks(history_from_year, target_year, step=10)
+        f = go.Figure()
         f.add_trace(go.Scatter(x=df["year"], y=df[m],
                                mode="lines", name=f"I(y) — total",
                                line=dict(color="black", width=2)))
@@ -869,8 +869,16 @@ with tab3:
             yaxis=dict(title=label, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=380,
+            xaxis=dict(
+                title="Year",
+                tickmode="array",
+                tickvals=ticks,
+                ticktext=[str(t) for t in ticks],
+                range=[history_from_year - 1, target_year + 3],
+                automargin=True,
+                tickfont=dict(size=10),
+            ),
         )
-        _apply_xaxis(f, history_from_year, target_year, step=10)
         return f
 
     def _bw_fig_shapley(df: pd.DataFrame, m: str, label: str) -> go.Figure:
