@@ -857,22 +857,37 @@ with tab3:
     def _bw_fig_shapley(df: pd.DataFrame, m: str, label: str) -> go.Figure:
         """Right-hand figure: Shapley between + Shapley within stacked
         against I(y).  Because the two pieces sum to the total by
-        construction, a stacked area gives a clean visual."""
-        f = go.Figure()
+        construction, a stacked area gives a clean visual.
+        A secondary y-axis shows the % of total inequality explained by
+        the between-country (Shapley) component."""
+        from plotly.subplots import make_subplots
+        f = make_subplots(specs=[[{"secondary_y": True}]])
         f.add_trace(go.Scatter(x=df["year"], y=df[f"{m}_sh_b"],
                                mode="lines",
                                name="Shapley between",
                                stackgroup="one",
-                               line=dict(color="#1f77b4")))
+                               line=dict(color="#1f77b4")),
+                    secondary_y=False)
         f.add_trace(go.Scatter(x=df["year"], y=df[f"{m}_sh_w"],
                                mode="lines",
                                name="Shapley within",
                                stackgroup="one",
-                               line=dict(color="#d62728")))
+                               line=dict(color="#d62728")),
+                    secondary_y=False)
         # Overlay the total as a solid line to visually confirm the stack.
         f.add_trace(go.Scatter(x=df["year"], y=df[m],
                                mode="lines", name="I(y) — total",
-                               line=dict(color="black", width=2, dash="dot")))
+                               line=dict(color="black", width=2, dash="dot")),
+                    secondary_y=False)
+        # % of total explained by Shapley between component (right axis).
+        total = df[m].replace(0, np.nan)  # avoid division by zero
+        pct_between = (df[f"{m}_sh_b"] / total) * 100
+        f.add_trace(go.Scatter(x=df["year"], y=pct_between,
+                               mode="lines",
+                               name="% between (Shapley)",
+                               line=dict(color="#ff7f0e", width=2,
+                                         dash="dash")),
+                    secondary_y=True)
         f.add_vrect(x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
                     fillcolor="lightgrey", opacity=0.25, line_width=0)
         f.add_vline(x=PROJECTION_START, line_dash="dash",
@@ -881,11 +896,14 @@ with tab3:
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: Shapley between/within (sums to total)",
-            xaxis=_xaxis(history_from_year, target_year),      # tick every 5 years
-            yaxis=dict(title=label, rangemode="tozero", hoverformat=".3f"),
+            xaxis=_xaxis(history_from_year, target_year),
             legend=dict(orientation="h", y=-0.2),
             height=380,
         )
+        f.update_yaxes(title_text=label, rangemode="tozero",
+                       hoverformat=".3f", secondary_y=False)
+        f.update_yaxes(title_text="% between", rangemode="tozero",
+                       hoverformat=".1f", secondary_y=True)
         return f
 
     for m, label in MEASURE_LABELS:
