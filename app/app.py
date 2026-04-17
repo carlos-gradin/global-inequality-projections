@@ -57,6 +57,14 @@ def _xaxis(start: int, end: int) -> dict:
     )
 
 
+def _apply_xaxis(fig, start: int, end: int):
+    """Apply x-axis tick settings to a figure AFTER all traces/shapes.
+
+    Calling update_xaxes last ensures Plotly annotations (add_vrect,
+    add_vline) cannot silently reset the tick configuration."""
+    fig.update_xaxes(**_xaxis(start, end))
+
+
 # ----------------------------------------------------------------------
 # Paths & data loading (cached — only re-reads on file change).
 # ----------------------------------------------------------------------
@@ -743,8 +751,6 @@ with tab1:
     )
     fig.update_layout(
         title=f"Global inequality, {history_from_year} → {target_year}",
-        # dtick=5 -> a tick label every 5 years (1950, 1955, ...).
-        xaxis=_xaxis(history_from_year, target_year),
         yaxis=dict(title="Gini / MLD / Theil", rangemode="tozero",
                    hoverformat=".3f"),
         yaxis2=dict(title="GE(2)", overlaying="y", side="right",
@@ -752,6 +758,7 @@ with tab1:
         legend=dict(orientation="h", y=-0.2),
         height=500,
     )
+    _apply_xaxis(fig, history_from_year, target_year)
     st.plotly_chart(fig, use_container_width=True)
 
 # ---- Tab 2: group shares (B40, M50, T10) + Palma on right axis ----
@@ -779,7 +786,6 @@ with tab2:
     )
     fig.update_layout(
         title="Population-group income shares and Palma ratio",
-        xaxis=_xaxis(history_from_year, target_year),          # tick every 5 years
         # rangemode="tozero" forces the y-axis to start at 0, even if
         # the data minimum is well above zero (e.g. Middle 50 % ~ 40 %).
         yaxis=dict(title="Income share (%)", rangemode="tozero",
@@ -790,6 +796,7 @@ with tab2:
         legend=dict(orientation="h", y=-0.2),
         height=500,
     )
+    _apply_xaxis(fig, history_from_year, target_year)
     st.plotly_chart(fig, use_container_width=True)
 
 # ---- Tab 3: country-level between/within decomposition ----
@@ -847,11 +854,11 @@ with tab3:
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: naive between/within",
-            xaxis=_xaxis(history_from_year, target_year),      # tick every 5 years
             yaxis=dict(title=label, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=380,
         )
+        _apply_xaxis(f, history_from_year, target_year)
         return f
 
     def _bw_fig_shapley(df: pd.DataFrame, m: str, label: str) -> go.Figure:
@@ -893,10 +900,10 @@ with tab3:
                     annotation_position="top")
         f.update_layout(
             title=f"{label}: Shapley between/within (sums to total)",
-            xaxis=_xaxis(history_from_year, target_year),
             legend=dict(orientation="h", y=-0.2),
             height=380,
         )
+        _apply_xaxis(f, history_from_year, target_year)
         f.update_yaxes(title_text=label, rangemode="tozero",
                        hoverformat=".3f", secondary_y=False)
         f.update_yaxes(title_text="% between", range=[0, 100],
@@ -1088,11 +1095,11 @@ with tab4:
     fig.update_layout(
         title=f"Average within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
               f"({wt_tag}), {history_from_year} → {target_year}",
-        xaxis=_xaxis(history_from_year, target_year),
         yaxis=dict(title=y_title, rangemode="tozero", hoverformat=".3f"),
         legend=dict(orientation="h", y=-0.2),
         height=520,
     )
+    _apply_xaxis(fig, history_from_year, target_year)
     st.plotly_chart(fig, use_container_width=True)
 
     if not len(c_idx_hist):
@@ -1160,11 +1167,11 @@ with tab4:
         fig_c.update_layout(
             title=f"Within-country {MEASURE_KEY_TO_LABEL_W[within_measure]} "
                   f"by country, {history_from_year} → {target_year}",
-            xaxis=_xaxis(history_from_year, target_year),
             yaxis=dict(title=y_title, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=520,
         )
+        _apply_xaxis(fig_c, history_from_year, target_year)
         st.plotly_chart(fig_c, use_container_width=True)
     else:
         st.caption("Pick at least one country to show the chart.")
@@ -1441,11 +1448,11 @@ with tab6:
 
         fig.update_layout(
             title=f"{MEASURE_KEY_TO_LABEL[measure]}: scenario comparison",
-            xaxis=_xaxis(history_from_year, target_year),
             yaxis=dict(title=y_axis_title, rangemode="tozero", hoverformat=".3f"),
             legend=dict(orientation="h", y=-0.2),
             height=520,
         )
+        _apply_xaxis(fig, history_from_year, target_year)
         st.plotly_chart(fig, use_container_width=True)
 
         # Small table with the saved-scenario specs, so users can remember
