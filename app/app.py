@@ -25,7 +25,9 @@ import streamlit as st
 
 from engine import (GrowthSpec, project, indices, indices_by_group,
                     between_within_country, benchmark_growth,
-                    country_indices)
+                    country_indices,
+                    PRO_POOR_PRESETS, apply_pro_poor_preset,
+                    historical_default_rates, imf_default_rates)
 
 # ----------------------------------------------------------------------
 # Paths & data loading (cached — only re-reads on file change).
@@ -86,6 +88,24 @@ def load_imf_benchmark() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     return pd.read_parquet(path)
+
+
+@st.cache_data(show_spinner=False)
+def load_historical_defaults() -> dict:
+    """Population-weighted average CAGR (2012-2022) for the world, by
+    region, and by income group."""
+    hist = load_historical_panel()
+    _, regions, _, _ = load_data()
+    return historical_default_rates(hist, regions, n_years=10, base_year=2022)
+
+
+@st.cache_data(show_spinner=False)
+def load_imf_defaults() -> dict:
+    """Population-weighted average IMF WEO forecast rate (2027-2031) for
+    the world, by region, and by income group."""
+    imf = load_imf_benchmark()
+    _, regions, _, _ = load_data()
+    return imf_default_rates(imf, regions)
 
 
 # ----------------------------------------------------------------------
@@ -204,6 +224,10 @@ REGIONS      = sorted(regions["region_wb"].dropna().unique())
 INCOMEGROUPS = ["Low income", "Lower middle income",
                 "Upper middle income", "High income"]   # fixed order
 
+# Benchmark growth rates for preset base-rate sources.
+HIST_DEFAULTS = load_historical_defaults()   # pop-weighted CAGR 2012-2022
+IMF_DEFAULTS  = load_imf_defaults()          # pop-weighted IMF WEO 2027-2031
+
 with st.sidebar:
     # Technical-note download link (PDF shipped with the app).
     _tn_path = DATA_DIR / "technical_note.pdf"
@@ -290,19 +314,37 @@ with st.sidebar:
     # --- Mode B ---
     if mode_label.startswith("B."):
         aggregate = aggregate_sidebar
+        # Base-rate source selector: lets the user start from historical
+        # or IMF benchmark rates instead of the flat baseline.
+        base_src_b = st.selectbox(
+            "Base rate source",
+            ["Custom (flat baseline)", "Historical trend (CAGR 2012–2022)",
+             "IMF forecast (WEO 2027–2031)"],
+            index=0, key="base_src_b",
+            help="Pre-fill group rates from a benchmark. You can still "
+                 "edit individual rates afterwards.",
+        )
+        if base_src_b.startswith("Historical"):
+            _src = HIST_DEFAULTS[aggregate]
+        elif base_src_b.startswith("IMF"):
+            _src = IMF_DEFAULTS[aggregate]
+        else:
+            _src = {}
         if aggregate == "region_wb":
             st.subheader("Rates by region (%)")
             for r in REGIONS:
                 rates_by_group[r] = st.number_input(
                     r, min_value=-99.0,
-                    value=base_rate_pct, step=0.1, key=f"reg_{r}"
+                    value=_src.get(r, base_rate_pct),
+                    step=0.1, key=f"reg_{r}_{base_src_b}"
                 ) / 100.0
         else:
             st.subheader("Rates by income group (%)")
             for g in INCOMEGROUPS:
                 rates_by_group[g] = st.number_input(
                     g, min_value=-99.0,
-                    value=base_rate_pct, step=0.1, key=f"ig_{g}"
+                    value=_src.get(g, base_rate_pct),
+                    step=0.1, key=f"ig_{g}_{base_src_b}"
                 ) / 100.0
 
     # --- Mode C ---
@@ -313,15 +355,43 @@ with st.sidebar:
             "(e.g. the bottom 40 % of each country, not the bottom 40 % "
             "of the world pooled)."
         )
+        # Pro-poor preset selector
+        preset_options_c = ["Custom"] + list(PRO_POOR_PRESETS.keys())
+        preset_c = st.selectbox(
+            "Scenario preset",
+            preset_options_c,
+            index=0,
+            key="preset_c",
+            help="Load empirically-calibrated pro-poor differentials "
+                 "relative to the baseline rate. You can still edit "
+                 "individual rates after loading a preset.",
+        )
+        if preset_c != "Custom":
+            pp = apply_pro_poor_preset(base_rate_pct, preset_c)
+            c_b40_val, c_m50_val, c_t10_val = pp["b40"], pp["m50"], pp["t10"]
+            diffs_c = PRO_POOR_PRESETS[preset_c]
+            st.caption(
+                f"Preset applies to the baseline rate ({base_rate_pct:.1f} %): "
+                f"B40 {diffs_c['b40_diff']:+.1f} pp, "
+                f"M50 {diffs_c['m50_diff']:+.1f} pp, "
+                f"T10 {diffs_c['t10_diff']:+.1f} pp. "
+                f"Calibrated from historical pro-poor growth episodes "
+                f"(see technical note)."
+            )
+        else:
+            c_b40_val = c_m50_val = c_t10_val = base_rate_pct
+        # Include base_rate_pct in the key so that changing the baseline
+        # resets the widgets to the correct preset-derived values.
+        _ck = f"{preset_c}_{base_rate_pct:.2f}"
         block_rates["b40"] = st.number_input(
-            "Bottom 40 %",  value=base_rate_pct, step=0.1,
-            min_value=-99.0, key="c_b40") / 100.0
+            "Bottom 40 %",  value=c_b40_val, step=0.1,
+            min_value=-99.0, key=f"c_b40_{_ck}") / 100.0
         block_rates["m50"] = st.number_input(
-            "Middle 50 %",  value=base_rate_pct, step=0.1,
-            min_value=-99.0, key="c_m50") / 100.0
+            "Middle 50 %",  value=c_m50_val, step=0.1,
+            min_value=-99.0, key=f"c_m50_{_ck}") / 100.0
         block_rates["t10"] = st.number_input(
-            "Top 10 %",     value=base_rate_pct, step=0.1,
-            min_value=-99.0, key="c_t10") / 100.0
+            "Top 10 %",     value=c_t10_val, step=0.1,
+            min_value=-99.0, key=f"c_t10_{_ck}") / 100.0
 
     # --- Mode D ---
     # Inputs for Mode D are a (groups × 3 blocks) table, which does not
@@ -402,15 +472,86 @@ if mode_label.startswith("D."):
             "means the bottom 40 % of each SSA country (Nigeria, Kenya, …) "
             "grows at 3 % — not the poorest 40 % of SSA as a whole."
         )
-        default_table = pd.DataFrame(
-            {"b40": base_rate_pct, "m50": base_rate_pct, "t10": base_rate_pct},
-            index=pd.Index(groups_D, name="group"),
+        # --- Base-rate source (sets per-group base rates) ---
+        base_src_d = st.selectbox(
+            "Base rate source",
+            ["Custom (flat baseline)",
+             "Historical trend (CAGR 2012–2022)",
+             "IMF forecast (WEO 2027–2031)"],
+            index=0, key="base_src_d",
+            help="Pre-fill the Base % column from a benchmark. "
+                 "You can still edit individual cells.",
         )
+        if base_src_d.startswith("Historical"):
+            _src_d = HIST_DEFAULTS[aggregate]
+        elif base_src_d.startswith("IMF"):
+            _src_d = IMF_DEFAULTS[aggregate]
+        else:
+            _src_d = {}
+        init_base = pd.Series(
+            [_src_d.get(g, base_rate_pct) for g in groups_D],
+            index=groups_D,
+        )
+
+        # --- Pro-poor differential preset ---
+        preset_options_d = ["Custom"] + list(PRO_POOR_PRESETS.keys())
+        preset_d = st.selectbox(
+            "Pro-poor scenario",
+            preset_options_d,
+            index=0,
+            key="preset_d",
+            help="Apply empirically-calibrated pro-poor differentials "
+                 "on top of the base rates. Block columns adjust "
+                 "automatically.",
+        )
+        editor_key = f"d_table_{aggregate}_{base_src_d}_{preset_d}"
+        if preset_d != "Custom":
+            diffs = PRO_POOR_PRESETS[preset_d]
+            base_vals = init_base.copy()
+            # Incorporate any base-column edits the user already made
+            # (stored in session state as deltas from the previous
+            # default).  This keeps the disabled block columns in sync
+            # with the edited base on re-runs.
+            prev = st.session_state.get(editor_key)
+            if prev and isinstance(prev, dict) and prev.get("edited_rows"):
+                for row_idx_str, changes in prev["edited_rows"].items():
+                    row_idx = int(row_idx_str)
+                    if "base" in changes and 0 <= row_idx < len(groups_D):
+                        base_vals.iloc[row_idx] = changes["base"]
+            default_table = pd.DataFrame({
+                "base": base_vals.values,
+                "b40":  base_vals.values + diffs["b40_diff"],
+                "m50":  base_vals.values + diffs["m50_diff"],
+                "t10":  base_vals.values + diffs["t10_diff"],
+            }, index=pd.Index(groups_D, name="group"))
+            st.caption(
+                f"Edit **Base %** per group — block rates adjust "
+                f"automatically (B40 {diffs['b40_diff']:+.1f} pp, "
+                f"M50 {diffs['m50_diff']:+.1f} pp, "
+                f"T10 {diffs['t10_diff']:+.1f} pp). "
+                f"Calibrated from historical pro-poor growth episodes "
+                f"(see technical note)."
+            )
+        else:
+            default_table = pd.DataFrame({
+                "base": init_base.values,
+                "b40":  init_base.values,
+                "m50":  init_base.values,
+                "t10":  init_base.values,
+            }, index=pd.Index(groups_D, name="group"))
+        # When a preset is active, block columns are derived from base;
+        # disable them so the user edits only the base column.
+        disabled_cols = (["b40", "m50", "t10"]
+                         if preset_d != "Custom" else [])
         edited = st.data_editor(
             default_table,
-            key=f"d_table_{aggregate}",
+            key=editor_key,
             num_rows="fixed",
+            disabled=disabled_cols,
             column_config={
+                "base": st.column_config.NumberColumn(
+                    "Base %", step=0.1, min_value=-99.0, format="%.2f",
+                    help="Average growth rate for this group"),
                 "b40": st.column_config.NumberColumn("Bottom 40 %", step=0.1,
                                                     min_value=-99.0,
                                                     format="%.2f"),
@@ -423,14 +564,26 @@ if mode_label.startswith("D."):
             },
             use_container_width=True,
         )
+        # Compute effective block rates from the edited table.
         for g in groups_D:
             if g in edited.index:
                 row = edited.loc[g]
-                block_rates_by_group[g] = {
-                    "b40": float(row["b40"]) / 100.0,
-                    "m50": float(row["m50"]) / 100.0,
-                    "t10": float(row["t10"]) / 100.0,
-                }
+                if preset_d != "Custom":
+                    # Derive block rates from the (possibly edited) base
+                    # column + preset differentials.
+                    b = float(row["base"])
+                    block_rates_by_group[g] = {
+                        "b40": (b + diffs["b40_diff"]) / 100.0,
+                        "m50": (b + diffs["m50_diff"]) / 100.0,
+                        "t10": (b + diffs["t10_diff"]) / 100.0,
+                    }
+                else:
+                    # Custom: use the block columns directly.
+                    block_rates_by_group[g] = {
+                        "b40": float(row["b40"]) / 100.0,
+                        "m50": float(row["m50"]) / 100.0,
+                        "t10": float(row["t10"]) / 100.0,
+                    }
 
 # Build the spec dict.  Mode letter -> engine mode string:
 #   A -> 'uniform'

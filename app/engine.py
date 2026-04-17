@@ -99,6 +99,174 @@ class GrowthSpec:
 
 
 # ======================================================================
+# Pro-poor growth presets
+# ======================================================================
+# Empirically calibrated from historical episodes of pro-poor growth
+# (438 country-window episodes across 2002-2012, 2002-2022, 2010-2022).
+#
+# Each preset is a dict of *differentials* in percentage points (pp)
+# relative to the user's baseline growth rate:
+#   b40_diff : extra growth for the bottom 40 %
+#   m50_diff : adjustment for the middle 50 % (zero — neutral)
+#   t10_diff : slower growth for the top 10 %
+#
+# Levels:
+#   Moderate     ~ global median of pro-poor episodes (~0.5 pp)
+#   Intermediate ~ LAC average over 2002-2022         (~1.0 pp)
+#   Intense      ~ LAC best decade 2002-2012          (~1.5 pp)
+#
+# Reference: Lustig, Lopez-Calva & Ortiz-Juarez (2013); Cord et al. (2017).
+
+PRO_POOR_PRESETS: dict[str, dict[str, float]] = {
+    "Pro-poor growth (moderate)": {
+        "b40_diff":  0.5,   # pp above base rate
+        "m50_diff":  0.0,
+        "t10_diff": -0.5,   # pp below base rate
+    },
+    "Pro-poor growth (intermediate)": {
+        "b40_diff":  1.0,
+        "m50_diff":  0.0,
+        "t10_diff": -1.0,
+    },
+    "Pro-poor growth (intense)": {
+        "b40_diff":  1.5,
+        "m50_diff":  0.0,
+        "t10_diff": -1.5,
+    },
+}
+
+
+def apply_pro_poor_preset(base_rate_pct: float, preset_name: str
+                          ) -> dict[str, float]:
+    """Return block rates in % given a base rate and a preset name.
+
+    >>> apply_pro_poor_preset(3.0, "Pro-poor growth (moderate)")
+    {'b40': 3.5, 'm50': 3.0, 't10': 2.5}
+    """
+    diffs = PRO_POOR_PRESETS[preset_name]
+    return {
+        "b40": base_rate_pct + diffs["b40_diff"],
+        "m50": base_rate_pct + diffs["m50_diff"],
+        "t10": base_rate_pct + diffs["t10_diff"],
+    }
+
+
+# ======================================================================
+# Historical default growth rates
+# ======================================================================
+
+def historical_default_rates(
+    historical: pd.DataFrame,
+    regions: pd.DataFrame,
+    n_years: int = 10,
+    base_year: int = 2022,
+) -> dict:
+    """Compute population-weighted average CAGR of mean income from the
+    WIID historical panel.  Used to set realistic default growth rates
+    in the app sidebar.
+
+    Returns a dict with keys:
+        'world'      : float  — global pop-weighted average (in %)
+        'region_wb'  : dict[str, float]  — per region (in %)
+        'incomegroup': dict[str, float]  — per income group (in %)
+
+    All rates are in **percent** (e.g. 2.80 for 2.80 %).
+    """
+    t0 = base_year - n_years
+    t1 = base_year
+
+    # Mean income per (country, year): average across 100 percentiles.
+    mean_inc = (historical
+                .groupby(["c3", "year"])["income_level"]
+                .mean()
+                .reset_index()
+                .rename(columns={"income_level": "mean_income"}))
+
+    y0 = mean_inc[mean_inc.year == t0].set_index("c3")["mean_income"]
+    y1 = mean_inc[mean_inc.year == t1].set_index("c3")["mean_income"]
+
+    both = pd.DataFrame({"y0": y0, "y1": y1}).dropna()
+    both = both[(both.y0 > 0) & (both.y1 > 0)]
+    both["cagr"] = (both.y1 / both.y0) ** (1.0 / n_years) - 1.0
+
+    # Merge region / income-group / population from the regions table.
+    meta = regions.set_index("c3")[["region_wb", "incomegroup", "population"]]
+    both = both.join(meta)
+    both = both.dropna(subset=["population"])
+
+    # World average (population-weighted), in percent.
+    world = float(np.average(both["cagr"], weights=both["population"]) * 100)
+
+    # By region.
+    by_region: dict[str, float] = {}
+    for r, g in both.groupby("region_wb"):
+        by_region[r] = round(
+            float(np.average(g["cagr"], weights=g["population"]) * 100), 2
+        )
+
+    # By income group.
+    by_incgrp: dict[str, float] = {}
+    for ig, g in both.groupby("incomegroup"):
+        by_incgrp[ig] = round(
+            float(np.average(g["cagr"], weights=g["population"]) * 100), 2
+        )
+
+    return {
+        "world": round(world, 2),
+        "region_wb": by_region,
+        "incomegroup": by_incgrp,
+    }
+
+
+def imf_default_rates(
+    imf_benchmark: pd.DataFrame,
+    regions: pd.DataFrame,
+) -> dict:
+    """Compute population-weighted average IMF WEO forecast rate by
+    region and income group.  The IMF benchmark table has per-country
+    annual rates for 2027-2031; we average across years per country
+    first, then aggregate by group.
+
+    Returns the same format as `historical_default_rates`.
+    """
+    if imf_benchmark.empty:
+        return {"world": 3.0, "region_wb": {}, "incomegroup": {}}
+
+    # Average rate per country across the forecast horizon.
+    avg = (imf_benchmark
+           .groupby("c3")["growth_rate"]
+           .mean()
+           .reset_index())
+    meta = regions[["c3", "region_wb", "incomegroup", "population"]]
+    avg = avg.merge(meta, on="c3", how="left").dropna(subset=["population"])
+
+    # Rates are in decimals (0.03 = 3 %); convert to percent.
+    avg["rate_pct"] = avg["growth_rate"] * 100.0
+
+    world = round(
+        float(np.average(avg["rate_pct"], weights=avg["population"])), 2
+    )
+
+    by_region: dict[str, float] = {}
+    for r, g in avg.groupby("region_wb"):
+        by_region[r] = round(
+            float(np.average(g["rate_pct"], weights=g["population"])), 2
+        )
+
+    by_incgrp: dict[str, float] = {}
+    for ig, g in avg.groupby("incomegroup"):
+        by_incgrp[ig] = round(
+            float(np.average(g["rate_pct"], weights=g["population"])), 2
+        )
+
+    return {
+        "world": world,
+        "region_wb": by_region,
+        "incomegroup": by_incgrp,
+    }
+
+
+# ======================================================================
 # Step 1: build a growth rate per (country, percentile)
 # ======================================================================
 
