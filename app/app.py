@@ -62,7 +62,11 @@ def _apply_xaxis(fig, start: int, end: int):
 
     Calling update_xaxes last ensures Plotly annotations (add_vrect,
     add_vline) cannot silently reset the tick configuration."""
-    fig.update_xaxes(**_xaxis(start, end))
+    cfg = _xaxis(start, end)
+    cfg["automargin"] = True      # prevent label clipping at edges
+    cfg["tickangle"] = 0          # keep labels horizontal
+    cfg["constrain"] = "domain"   # don't let labels push the plot area
+    fig.update_xaxes(**cfg)
 
 
 # ----------------------------------------------------------------------
@@ -834,7 +838,8 @@ with tab3:
 
     def _bw_fig_naive(df: pd.DataFrame, m: str, label: str) -> go.Figure:
         """Left-hand figure: I(y), I(y^b) and I(y^w) as lines over time."""
-        f = go.Figure()
+        from plotly.subplots import make_subplots
+        f = make_subplots()
         f.add_trace(go.Scatter(x=df["year"], y=df[m],
                                mode="lines", name=f"I(y) — total",
                                line=dict(color="black", width=2)))
