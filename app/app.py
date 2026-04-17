@@ -44,7 +44,7 @@ def _year_ticks(start: int, end: int, step: int = 5) -> list[int]:
     return ticks
 
 
-def _xaxis(start: int, end: int) -> dict:
+def _xaxis(start: int, end: int, step: int = 5) -> dict:
     """Standard x-axis dict for all time-series charts.
 
     Uses tickmode='array' with explicit tickvals so the target year
@@ -52,17 +52,24 @@ def _xaxis(start: int, end: int) -> dict:
     return dict(
         title="Year",
         tickmode="array",
-        tickvals=_year_ticks(start, end),
+        tickvals=_year_ticks(start, end, step=step),
         range=[start - 1, end + 1],
     )
 
 
-def _apply_xaxis(fig, start: int, end: int):
+def _apply_xaxis(fig, start: int, end: int, step: int = 5):
     """Apply x-axis tick settings to a figure AFTER all traces/shapes.
 
     Calling update_xaxes last ensures Plotly annotations (add_vrect,
-    add_vline) cannot silently reset the tick configuration."""
-    cfg = _xaxis(start, end)
+    add_vline) cannot silently reset the tick configuration.
+
+    Parameters
+    ----------
+    step : int
+        Tick spacing in years.  Use 10 for narrow charts (e.g. side-by-side
+        columns) so labels don't crowd and get hidden by Plotly JS.
+    """
+    cfg = _xaxis(start, end, step=step)
     cfg["automargin"] = True      # prevent label clipping at edges
     cfg["tickangle"] = 0          # keep labels horizontal
     cfg["constrain"] = "domain"   # don't let labels push the plot area
@@ -863,7 +870,7 @@ with tab3:
             legend=dict(orientation="h", y=-0.2),
             height=380,
         )
-        _apply_xaxis(f, history_from_year, target_year)
+        _apply_xaxis(f, history_from_year, target_year, step=10)
         return f
 
     def _bw_fig_shapley(df: pd.DataFrame, m: str, label: str) -> go.Figure:
@@ -908,7 +915,7 @@ with tab3:
             legend=dict(orientation="h", y=-0.2),
             height=380,
         )
-        _apply_xaxis(f, history_from_year, target_year)
+        _apply_xaxis(f, history_from_year, target_year, step=10)
         f.update_yaxes(title_text=label, rangemode="tozero",
                        hoverformat=".3f", secondary_y=False)
         f.update_yaxes(title_text="% between", range=[0, 100],
