@@ -26,7 +26,8 @@ import streamlit as st
 from engine import (GrowthSpec, project, indices, indices_by_group,
                     between_within_country, benchmark_growth,
                     country_indices,
-                    PRO_POOR_PRESETS, apply_pro_poor_preset,
+                    PRO_POOR_PRESETS, PRO_POOR_PRESET_NAMES,
+                    EXTREME_PRESET_NAME, apply_pro_poor_preset,
                     historical_default_rates, imf_default_rates)
 
 # ----------------------------------------------------------------------
@@ -356,7 +357,7 @@ with st.sidebar:
             "of the world pooled)."
         )
         # Pro-poor preset selector
-        preset_options_c = ["Custom"] + list(PRO_POOR_PRESETS.keys())
+        preset_options_c = ["Custom"] + PRO_POOR_PRESET_NAMES
         preset_c = st.selectbox(
             "Scenario preset",
             preset_options_c,
@@ -369,15 +370,22 @@ with st.sidebar:
         if preset_c != "Custom":
             pp = apply_pro_poor_preset(base_rate_pct, preset_c)
             c_b40_val, c_m50_val, c_t10_val = pp["b40"], pp["m50"], pp["t10"]
-            diffs_c = PRO_POOR_PRESETS[preset_c]
-            st.caption(
-                f"Preset applies to the baseline rate ({base_rate_pct:.1f} %): "
-                f"B40 {diffs_c['b40_diff']:+.1f} pp, "
-                f"M50 {diffs_c['m50_diff']:+.1f} pp, "
-                f"T10 {diffs_c['t10_diff']:+.1f} pp. "
-                f"Calibrated from historical pro-poor growth episodes "
-                f"(see technical note)."
-            )
+            if preset_c == EXTREME_PRESET_NAME:
+                st.caption(
+                    f"**Extreme redistribution** (base {base_rate_pct:.1f} %): "
+                    f"T10 = 0 %, M50 = base, B40 = {c_b40_val:.2f} % "
+                    f"(absorbs residual so weighted average = base rate)."
+                )
+            else:
+                diffs_c = PRO_POOR_PRESETS[preset_c]
+                st.caption(
+                    f"Preset applies to the baseline rate ({base_rate_pct:.1f} %): "
+                    f"B40 {diffs_c['b40_diff']:+.1f} pp, "
+                    f"M50 {diffs_c['m50_diff']:+.1f} pp, "
+                    f"T10 {diffs_c['t10_diff']:+.1f} pp. "
+                    f"Calibrated from historical pro-poor growth episodes "
+                    f"(see technical note)."
+                )
         else:
             c_b40_val = c_m50_val = c_t10_val = base_rate_pct
         # Include base_rate_pct in the key so that changing the baseline
@@ -494,7 +502,7 @@ if mode_label.startswith("D."):
         )
 
         # --- Pro-poor differential preset ---
-        preset_options_d = ["Custom"] + list(PRO_POOR_PRESETS.keys())
+        preset_options_d = ["Custom"] + PRO_POOR_PRESET_NAMES
         preset_d = st.selectbox(
             "Pro-poor scenario",
             preset_options_d,
@@ -506,7 +514,6 @@ if mode_label.startswith("D."):
         )
         editor_key = f"d_table_{aggregate}_{base_src_d}_{preset_d}"
         if preset_d != "Custom":
-            diffs = PRO_POOR_PRESETS[preset_d]
             base_vals = init_base.copy()
             # Incorporate any base-column edits the user already made
             # (stored in session state as deltas from the previous
@@ -518,20 +525,35 @@ if mode_label.startswith("D."):
                     row_idx = int(row_idx_str)
                     if "base" in changes and 0 <= row_idx < len(groups_D):
                         base_vals.iloc[row_idx] = changes["base"]
+            # Compute block rates from the preset for each group's base.
+            b40_vals = np.array([apply_pro_poor_preset(b, preset_d)["b40"]
+                                 for b in base_vals.values])
+            m50_vals = np.array([apply_pro_poor_preset(b, preset_d)["m50"]
+                                 for b in base_vals.values])
+            t10_vals = np.array([apply_pro_poor_preset(b, preset_d)["t10"]
+                                 for b in base_vals.values])
             default_table = pd.DataFrame({
                 "base": base_vals.values,
-                "b40":  base_vals.values + diffs["b40_diff"],
-                "m50":  base_vals.values + diffs["m50_diff"],
-                "t10":  base_vals.values + diffs["t10_diff"],
+                "b40":  b40_vals,
+                "m50":  m50_vals,
+                "t10":  t10_vals,
             }, index=pd.Index(groups_D, name="group"))
-            st.caption(
-                f"Edit **Base %** per group — block rates adjust "
-                f"automatically (B40 {diffs['b40_diff']:+.1f} pp, "
-                f"M50 {diffs['m50_diff']:+.1f} pp, "
-                f"T10 {diffs['t10_diff']:+.1f} pp). "
-                f"Calibrated from historical pro-poor growth episodes "
-                f"(see technical note)."
-            )
+            if preset_d == EXTREME_PRESET_NAME:
+                st.caption(
+                    "**Extreme redistribution**: T10 = 0 %, M50 = base, "
+                    "B40 absorbs the residual (= 1.25 × base) so the "
+                    "population-weighted average equals the base rate."
+                )
+            else:
+                diffs = PRO_POOR_PRESETS[preset_d]
+                st.caption(
+                    f"Edit **Base %** per group — block rates adjust "
+                    f"automatically (B40 {diffs['b40_diff']:+.1f} pp, "
+                    f"M50 {diffs['m50_diff']:+.1f} pp, "
+                    f"T10 {diffs['t10_diff']:+.1f} pp). "
+                    f"Calibrated from historical pro-poor growth episodes "
+                    f"(see technical note)."
+                )
         else:
             default_table = pd.DataFrame({
                 "base": init_base.values,
@@ -570,12 +592,14 @@ if mode_label.startswith("D."):
                 row = edited.loc[g]
                 if preset_d != "Custom":
                     # Derive block rates from the (possibly edited) base
-                    # column + preset differentials.
+                    # column via the preset (works for both differential
+                    # and extreme presets).
                     b = float(row["base"])
+                    pp = apply_pro_poor_preset(b, preset_d)
                     block_rates_by_group[g] = {
-                        "b40": (b + diffs["b40_diff"]) / 100.0,
-                        "m50": (b + diffs["m50_diff"]) / 100.0,
-                        "t10": (b + diffs["t10_diff"]) / 100.0,
+                        "b40": pp["b40"] / 100.0,
+                        "m50": pp["m50"] / 100.0,
+                        "t10": pp["t10"] / 100.0,
                     }
                 else:
                     # Custom: use the block columns directly.

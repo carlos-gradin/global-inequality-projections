@@ -114,8 +114,14 @@ class GrowthSpec:
 #   Moderate     ~ global median of pro-poor episodes (~0.5 pp)
 #   Intermediate ~ LAC average over 2002-2022         (~1.0 pp)
 #   Intense      ~ LAC best decade 2002-2012          (~1.5 pp)
+#   Extreme      ~ budget-neutral: T10=0%, M50=base, B40 absorbs
+#                  the residual so the pop-weighted average = base.
 #
 # Reference: Lustig, Lopez-Calva & Ortiz-Juarez (2013); Cord et al. (2017).
+
+# Name of the extreme preset (handled differently — proportional, not
+# fixed pp differentials).
+EXTREME_PRESET_NAME = "Pro-poor growth (extreme)"
 
 PRO_POOR_PRESETS: dict[str, dict[str, float]] = {
     "Pro-poor growth (moderate)": {
@@ -135,14 +141,41 @@ PRO_POOR_PRESETS: dict[str, dict[str, float]] = {
     },
 }
 
+# Ordered list of all preset names (used by the UI dropdown).
+PRO_POOR_PRESET_NAMES: list[str] = list(PRO_POOR_PRESETS.keys()) + [
+    EXTREME_PRESET_NAME,
+]
+
 
 def apply_pro_poor_preset(base_rate_pct: float, preset_name: str
                           ) -> dict[str, float]:
     """Return block rates in % given a base rate and a preset name.
 
+    For the moderate/intermediate/intense presets, fixed percentage-point
+    differentials are added to the base rate.
+
+    For the extreme preset, the top 10 % gets 0 % growth, the middle 50 %
+    keeps the base rate, and the bottom 40 % absorbs the residual so that
+    the population-weighted average across blocks equals the base rate:
+
+        0.40 × B40 + 0.50 × base + 0.10 × 0 = base
+        → B40 = 1.25 × base
+
     >>> apply_pro_poor_preset(3.0, "Pro-poor growth (moderate)")
     {'b40': 3.5, 'm50': 3.0, 't10': 2.5}
+    >>> apply_pro_poor_preset(3.0, "Pro-poor growth (extreme)")
+    {'b40': 3.75, 'm50': 3.0, 't10': 0.0}
     """
+    if preset_name == EXTREME_PRESET_NAME:
+        # Budget-neutral extreme redistribution.
+        # T10 = 0 %, M50 = base, B40 = 1.25 × base (from weighted-avg
+        # constraint with block shares 40/50/10).
+        b40_rate = 1.25 * base_rate_pct
+        return {
+            "b40": round(b40_rate, 4),
+            "m50": base_rate_pct,
+            "t10": 0.0,
+        }
     diffs = PRO_POOR_PRESETS[preset_name]
     return {
         "b40": base_rate_pct + diffs["b40_diff"],
