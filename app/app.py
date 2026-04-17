@@ -876,11 +876,6 @@ with tab3:
                                line=dict(color="#f0a0a0"),
                                fillcolor="rgba(240,160,160,0.4)"),
                     secondary_y=False)
-        # Overlay the total as a solid line to visually confirm the stack.
-        f.add_trace(go.Scatter(x=df["year"], y=df[m],
-                               mode="lines", name="I(y) — total",
-                               line=dict(color="black", width=2, dash="dot")),
-                    secondary_y=False)
         # % of total explained by Shapley between component (right axis).
         total = df[m].replace(0, np.nan)  # avoid division by zero
         pct_between = (df[f"{m}_sh_b"] / total) * 100
