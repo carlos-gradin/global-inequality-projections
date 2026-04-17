@@ -866,13 +866,15 @@ with tab3:
                                mode="lines",
                                name="Shapley between",
                                stackgroup="one",
-                               line=dict(color="#1f77b4")),
+                               line=dict(color="#a0c4e8"),
+                               fillcolor="rgba(160,196,232,0.4)"),
                     secondary_y=False)
         f.add_trace(go.Scatter(x=df["year"], y=df[f"{m}_sh_w"],
                                mode="lines",
                                name="Shapley within",
                                stackgroup="one",
-                               line=dict(color="#d62728")),
+                               line=dict(color="#f0a0a0"),
+                               fillcolor="rgba(240,160,160,0.4)"),
                     secondary_y=False)
         # Overlay the total as a solid line to visually confirm the stack.
         f.add_trace(go.Scatter(x=df["year"], y=df[m],
@@ -885,7 +887,7 @@ with tab3:
         f.add_trace(go.Scatter(x=df["year"], y=pct_between,
                                mode="lines",
                                name="% between (Shapley)",
-                               line=dict(color="#ff7f0e", width=2,
+                               line=dict(color="#d45500", width=2.5,
                                          dash="dash")),
                     secondary_y=True)
         f.add_vrect(x0=BACKFILL_START - 0.5, x1=PROJECTION_START - 0.5,
@@ -902,7 +904,7 @@ with tab3:
         )
         f.update_yaxes(title_text=label, rangemode="tozero",
                        hoverformat=".3f", secondary_y=False)
-        f.update_yaxes(title_text="% between", rangemode="tozero",
+        f.update_yaxes(title_text="% between", range=[0, 100],
                        hoverformat=".1f", secondary_y=True)
         return f
 
